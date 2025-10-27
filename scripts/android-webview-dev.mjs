@@ -4,10 +4,11 @@
  * - Detects or installs SDK automatically
  * - Supports both arm64 (Apple Silicon) and x86_64 (Windows)
  * - Automatically creates and launches Galaxy device AVDs
+ * - 💡 Automatically installs Gradle + generates gradlew if missing
  */
 
 import inquirer from "inquirer";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -75,15 +76,51 @@ function run(cmd, args = [], opts = {}) {
 
 async function downloadFile(url, dest) {
   console.log(`[download] ${url}`);
+
   await new Promise((res, rej) => {
     const file = createWriteStream(dest);
-    https
-      .get(url, (r) => {
-        if (r.statusCode !== 200) rej(new Error(`HTTP ${r.statusCode}`));
-        r.pipe(file);
-        file.on("finish", () => file.close(res));
-      })
-      .on("error", rej);
+
+    function request(urlToFetch) {
+      https
+        .get(urlToFetch, (r) => {
+          // ✅ handle redirect (301, 302, 303, 307, 308)
+          if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+            console.log(`↪ Redirecting to ${r.headers.location}`);
+            r.resume();
+            request(r.headers.location);
+            return;
+          }
+
+          if (r.statusCode !== 200) {
+            rej(new Error(`HTTP ${r.statusCode} for ${urlToFetch}`));
+            return;
+          }
+
+          const total = parseInt(r.headers["content-length"] || "0", 10);
+          let downloaded = 0;
+          let lastPercent = 0;
+
+          r.on("data", (chunk) => {
+            downloaded += chunk.length;
+            if (total > 0) {
+              const percent = Math.floor((downloaded / total) * 100);
+              if (percent !== lastPercent && percent % 2 === 0) {
+                process.stdout.write(`\r📦 Downloading... ${percent}%`);
+                lastPercent = percent;
+              }
+            }
+          });
+
+          r.pipe(file);
+          file.on("finish", () => {
+            console.log("\n✅ Download complete!");
+            file.close(res);
+          });
+        })
+        .on("error", rej);
+    }
+
+    request(url);
   });
 }
 
@@ -105,6 +142,49 @@ function detectAndroidStudioSdk() {
     } catch (_) {}
   }
   return null;
+}
+
+/* ────────────────────────────────────────────────
+   Gradle Installer (💡 추가)
+──────────────────────────────────────────────── */
+async function ensureGradle(androidDir) {
+  console.log("\n🔍 Checking Gradle...");
+
+  // gradlew already exists
+  if (existsSync(join(androidDir, "gradlew"))) {
+    console.log("✔ Gradle Wrapper already exists.");
+    return;
+  }
+
+  try {
+    const version = execSync("gradle -v", { encoding: "utf8" });
+    console.log(`✔ Found system Gradle:\n${version}`);
+  } catch {
+    console.log("⚙️ Gradle not found. Installing Gradle 8.7...");
+    const zipUrl =
+      "https://services.gradle.org/distributions/gradle-8.7-bin.zip";
+    const zipFile = join(TMP, "gradle.zip");
+    const extractPath = join(TMP, "gradle");
+
+    await downloadFile(zipUrl, zipFile);
+
+    if (isWindows)
+      await run("powershell", [
+        "Expand-Archive",
+        `-Path \"${zipFile}\"`,
+        `-DestinationPath \"${extractPath}\"`,
+        "-Force",
+      ]);
+    else await run("unzip", ["-o", zipFile, "-d", extractPath]);
+
+    const gradleBin = join(extractPath, readdirSync(extractPath)[0], "bin");
+    process.env.PATH = `${gradleBin}:${process.env.PATH}`;
+    console.log(`✔ Added Gradle to PATH: ${gradleBin}`);
+  }
+
+  console.log("🧱 Generating Gradle Wrapper...");
+  await run("gradle", ["wrapper"], { cwd: androidDir });
+  console.log("✅ Gradle Wrapper created!");
 }
 
 /* ────────────────────────────────────────────────
@@ -231,7 +311,7 @@ async function launchEmulator(androidHome, avdName) {
 
   const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
   const accelArgs = isMac
-    ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"] // ✅ 변경됨
+    ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"]
     : ["-accel", "on", "-gpu", "host"];
 
   const proc = spawn(emulatorCmd, [...baseArgs, ...accelArgs], {
@@ -293,15 +373,17 @@ async function main() {
     await new Promise((res) => setTimeout(res, 5000));
   }
 
+  // 💡 여기서 Gradle 자동 설치 추가
+  const androidDir = join(process.cwd(), "android");
+  await ensureGradle(androidDir);
+
   // 2️⃣ Android 앱 빌드 및 설치
   console.log("\n🔧 Building Android app...");
   const gradlew = isWindows ? "gradlew.bat" : "./gradlew";
-  await run(gradlew, ["assembleDebug"], {
-    cwd: join(process.cwd(), "android"),
-  });
+  await run(gradlew, ["assembleDebug"], { cwd: androidDir });
 
   console.log("📱 Installing app on emulator...");
-  await run(gradlew, ["installDebug"], { cwd: join(process.cwd(), "android") });
+  await run(gradlew, ["installDebug"], { cwd: androidDir });
 
   // 3️⃣ 앱 자동 실행
   console.log("\n🚀 Launching WebView app...");

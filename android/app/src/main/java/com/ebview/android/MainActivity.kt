@@ -29,7 +29,6 @@ class MainActivity : ComponentActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             cacheMode = WebSettings.LOAD_NO_CACHE
-            setAppCacheEnabled(false)
             allowFileAccess = false
             allowContentAccess = false
             mediaPlaybackRequiresUserGesture = false
