@@ -1,229 +1,252 @@
+#!/usr/bin/env node
+/**
+ * Android AVD Auto Setup (macOS + Windows)
+ * - Detect Android Studio SDK automatically
+ * - Reuse existing SDK if available
+ * - Download cmdline-tools only when missing
+ * - Automatically chooses valid system image combinations
+ */
+
+import inquirer from "inquirer";
 import { spawn } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
-import fs from "node:fs/promises";
-import path from "node:path";
-import process from "node:process";
-import { fileURLToPath } from "node:url";
+import {
+  existsSync,
+  mkdirSync,
+  createWriteStream,
+  writeFileSync,
+  readdirSync,
+} from "node:fs";
+import { homedir, tmpdir, platform } from "node:os";
+import { join } from "node:path";
+import https from "node:https";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const repoRoot = path.resolve(__dirname, "..");
-const androidDir = path.join(repoRoot, "android");
+const isWindows = platform() === "win32";
+const HOME = homedir();
+const TMP = tmpdir();
 
-const DEFAULT_DEV_URL = "http://10.0.2.2:5173";
-const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? DEFAULT_DEV_URL;
-const skipViteServer = process.env.SKIP_VITE_SERVER === '1';
-const avdName = process.env.ANDROID_AVD ?? "Pixel_5_API_34";
+const DEFAULT_SDK_PATH = isWindows
+  ? join(HOME, "AppData", "Local", "Android", "Sdk")
+  : join(HOME, "Library", "Android", "sdk");
 
-const ANDROID_HOME = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
-if (!ANDROID_HOME) {
-  console.error("✖ ANDROID_HOME or ANDROID_SDK_ROOT must be set before running this script.");
-  process.exitCode = 1;
-  process.exit();
-}
+const SDK_VERSION = "12266719";
+const SDK_URL = isWindows
+  ? `https://dl.google.com/android/repository/commandlinetools-win-${SDK_VERSION}_latest.zip`
+  : `https://dl.google.com/android/repository/commandlinetools-mac-${SDK_VERSION}_latest.zip`;
 
-const adbCmd = process.env.ANDROID_ADB ?? path.join(ANDROID_HOME, "platform-tools", process.platform === "win32" ? "adb.exe" : "adb");
-const emulatorCmd = process.env.ANDROID_EMULATOR ?? path.join(ANDROID_HOME, "emulator", process.platform === "win32" ? "emulator.exe" : "emulator");
+/* ────────────────────────────────────────────────
+   Device Presets (OS 세대 반영)
+──────────────────────────────────────────────── */
+const DEVICE_PRESETS = {
+  "Galaxy Note10": {
+    name: "Galaxy_Note10_API_31",
+    api: "android-31",
+    res: { w: 1080, h: 2280, d: 401 },
+    ram: 8192,
+  },
+  "Galaxy Note20": {
+    name: "Galaxy_Note20_API_31",
+    api: "android-31",
+    res: { w: 1080, h: 2400, d: 393 },
+    ram: 8192,
+  },
+  "Galaxy S22": {
+    name: "Galaxy_S22_API_31",
+    api: "android-31",
+    res: { w: 1080, h: 2340, d: 420 },
+    ram: 8192,
+  },
+};
 
-const gradleWrapper = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
-const gradleFallback = process.platform === "win32" ? "gradle.bat" : "gradle";
+/* ────────────────────────────────────────────────
+   SDK Detection
+──────────────────────────────────────────────── */
+function detectAndroidStudioSdk() {
+  const studioPaths = [
+    "/Applications/Android Studio.app/Contents",
+    "C:\\Program Files\\Android\\Android Studio",
+  ];
 
-/**
- * Spawn a child process and wait for completion.
- */
-function run(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, {
-      stdio: "inherit",
-      ...options,
-    });
-
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
-      }
-    });
-  });
-}
-
-/**
- * Spawn a child process that should remain running (e.g. Vite dev server).
- */
-function runPersistent(command, args, options = {}) {
-  const proc = spawn(command, args, {
-    stdio: "inherit",
-    ...options,
-  });
-
-  proc.on("error", (error) => {
-    console.error(`✖ Failed to start ${command}:`, error);
-    process.exitCode = 1;
-    process.exit();
-  });
-
-  return proc;
-}
-
-async function waitForHttp(url, attempts = 60, intervalMs = 1000) {
-  for (let i = 0; i < attempts; i += 1) {
+  for (const base of studioPaths) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), intervalMs);
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (response.ok) {
-        return;
-      }
-    } catch (error) {
-      // ignore and retry
-    }
-    await delay(intervalMs);
-  }
-  throw new Error(`Timed out waiting for HTTP server at ${url}`);
-}
-
-async function adb(args, options = {}) {
-  await run(adbCmd, args, options);
-}
-
-async function adbQuery(args) {
-  const output = await new Promise((resolve, reject) => {
-    const proc = spawn(adbCmd, args);
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(stderr.trim() || `adb exited with code ${code}`));
-      }
-    });
-  });
-  return output;
-}
-
-async function isEmulatorRunning() {
-  const devices = await adbQuery(["devices"]);
-  return devices.split("\n").slice(1).some((line) => line.startsWith("emulator-"));
-}
-
-function waitForBoot() {
-  return new Promise((resolve, reject) => {
-    const interval = setInterval(async () => {
-      try {
-        const boot = await adbQuery(["shell", "getprop", "sys.boot_completed"]);
-        if (boot === "1") {
-          clearInterval(interval);
-          resolve();
+      const subdirs = readdirSync(base, { withFileTypes: true });
+      for (const d of subdirs) {
+        if (d.name.toLowerCase().includes("sdk")) {
+          const sdkPath = join(base, d.name);
+          console.log(`✅ Found Android Studio SDK at: ${sdkPath}`);
+          return sdkPath;
         }
-      } catch (error) {
-        // ignore until adb is ready
       }
-    }, 2000);
+    } catch (_) {}
+  }
+  return null;
+}
 
-    setTimeout(() => {
-      clearInterval(interval);
-      reject(new Error("Timed out waiting for emulator to boot"));
-    }, 5 * 60 * 1000);
+/* ────────────────────────────────────────────────
+   Utils
+──────────────────────────────────────────────── */
+async function downloadFile(url, dest) {
+  console.log(`[download] ${url}`);
+  await new Promise((res, rej) => {
+    const file = createWriteStream(dest);
+    https
+      .get(url, (r) => {
+        if (r.statusCode !== 200) rej(new Error(`HTTP ${r.statusCode}`));
+        r.pipe(file);
+        file.on("finish", () => file.close(res));
+      })
+      .on("error", rej);
   });
 }
 
-async function resolveGradleCommand() {
-  try {
-    await fs.access(path.join(androidDir, gradleWrapper.replace(/^\.\//, "")));
-    return gradleWrapper;
-  } catch {
-    console.warn("⚠️ Gradle wrapper not found. Falling back to system 'gradle'.");
-    return gradleFallback;
-  }
+function run(cmd, args = [], opts = {}) {
+  return new Promise((res, rej) => {
+    const c = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
+    c.on("exit", (code) =>
+      code === 0 ? res() : rej(new Error(`${cmd} exit ${code}`))
+    );
+  });
 }
 
-let devServer;
-let emulator;
+/* ────────────────────────────────────────────────
+   SDK Installation
+──────────────────────────────────────────────── */
+async function ensureSdk(androidHome) {
+  const cmdlineDir = join(androidHome, "cmdline-tools", "latest");
+  if (existsSync(cmdlineDir)) {
+    console.log("✔ Command-line tools already exist.");
+    return;
+  }
 
-async function cleanup() {
-  if (devServer && !devServer.killed) {
-    devServer.kill("SIGINT");
-  }
-  if (emulator && !emulator.killed) {
-    emulator.kill("SIGINT");
-  }
+  mkdirSync(join(androidHome, "cmdline-tools"), { recursive: true });
+  const zip = join(TMP, "cmdtools.zip");
+  await downloadFile(SDK_URL, zip);
+  if (isWindows)
+    await run("powershell", [
+      "Expand-Archive",
+      `-Path \"${zip}\"`,
+      `-DestinationPath \"${join(androidHome, "cmdline-tools")}\"`,
+      "-Force",
+    ]);
+  else
+    await run("unzip", ["-o", zip, "-d", join(androidHome, "cmdline-tools")]);
+  await run("mv", [
+    join(androidHome, "cmdline-tools", "cmdline-tools"),
+    cmdlineDir,
+  ]);
+  console.log("✔ Installed command-line tools.");
 }
 
-async function main() {
-  const gradleCommand = await resolveGradleCommand();
+/* ────────────────────────────────────────────────
+   Platform + System Images Installer
+──────────────────────────────────────────────── */
+async function installPlatformTools(androidHome, api) {
+  const sdkm = isWindows
+    ? join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
+    : join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager");
 
-  if (!skipViteServer) {
-    console.log("▶ Starting Vite dev server on 0.0.0.0:5173...");
-    devServer = runPersistent("npx", ["vite", "--host", "0.0.0.0", "--port", "5173"], {
-      cwd: repoRoot,
-      env: { ...process.env, BROWSER: "none" },
-    });
-  } else {
-    console.log("ℹ️ SKIP_VITE_SERVER=1 detected. Expecting an already running dev server.");
+  // ✅ ABI 자동 감지
+  const abi = isWindows ? "x86_64" : "arm64-v8a";
+
+  // ✅ System image 타입 자동 결정
+  const sysImg = "google_apis";
+
+  const systemImagePath = `system-images;${api};${sysImg};${abi}`;
+  console.log(`📦 Installing ${systemImagePath}`);
+
+  await run(
+    sdkm,
+    [
+      `--sdk_root=${androidHome}`,
+      "platform-tools",
+      "emulator",
+      `platforms;${api}`,
+      systemImagePath,
+    ],
+    { shell: false }
+  );
+
+  return { sysImg, abi };
+}
+
+/* ────────────────────────────────────────────────
+   AVD Creation
+──────────────────────────────────────────────── */
+async function createAvd(androidHome, preset, sysImg, abi) {
+  const { name, api, res, ram } = preset;
+  const avdDir = join(HOME, ".android", "avd", `${name}.avd`);
+  if (existsSync(avdDir)) {
+    console.log("✔ AVD already exists.");
+    return;
   }
 
-  process.on("SIGINT", async () => {
-    await cleanup();
-    process.exit(0);
-  });
-  process.on("SIGTERM", async () => {
-    await cleanup();
-    process.exit(0);
-  });
+  const avdm = isWindows
+    ? join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager.bat")
+    : join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager");
 
-  console.log(`▶ Waiting for dev server at ${devServerUrl}...`);
-  await waitForHttp(devServerUrl);
-  console.log("✔ Dev server is ready");
-
-  const emulatorWasRunning = await isEmulatorRunning();
-  if (!emulatorWasRunning) {
-    console.log(`▶ Starting Android emulator '${avdName}'...`);
-    emulator = runPersistent(emulatorCmd, ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"], {
-      env: process.env,
-    });
-  } else {
-    console.log("ℹ️ Emulator already running, skipping start");
-  }
-
-  console.log("▶ Waiting for emulator to be ready (this can take a minute)...");
-  await adb(["wait-for-device"]);
-  await waitForBoot();
-  console.log("✔ Emulator boot complete");
-
-  console.log("▶ Building and installing WebView Android app...");
-  await run(gradleCommand, ["installDebug"], { cwd: androidDir, env: process.env });
-
-  console.log("▶ Launching WebView app...");
-  await adb([
-    "shell",
-    "am",
-    "start",
+  await run(avdm, [
+    "create",
+    "avd",
     "-n",
-    "com.ebview.android/.MainActivity",
-    "-a",
-    "android.intent.action.MAIN",
-    "-c",
-    "android.intent.category.LAUNCHER",
+    name,
+    "-k",
+    `system-images;${api};${sysImg};${abi}`,
+    "--device",
+    "pixel_5",
+    "--force",
   ]);
 
-  console.log("✔ Android WebView ready. Open Chrome on your desktop and navigate to chrome://inspect to debug the WebView.");
-  console.log("ℹ️ Press Ctrl+C to stop the dev server (the emulator will continue running).");
+  const config = `
+AvdId=${name}
+PlayStore.enabled=true
+abi.type=${abi}
+avd.ini.displayname=${name}
+hw.lcd.density=${res.d}
+hw.lcd.width=${res.w}
+hw.lcd.height=${res.h}
+hw.ramSize=${ram}
+hw.cpu.ncore=8
+skin.name=${res.w}x${res.h}
+image.sysdir.1=${androidHome}/system-images/${api}/${sysImg}/${abi}/
+tag.display=${sysImg}
+  `.trim();
+
+  writeFileSync(join(avdDir, "config.ini"), config);
+  console.log(`✔ Created AVD for ${name}`);
 }
 
-main().catch(async (error) => {
-  console.error("✖", error.message);
-  await cleanup();
-  process.exitCode = 1;
+/* ────────────────────────────────────────────────
+   Main
+──────────────────────────────────────────────── */
+async function main() {
+  console.log("\x1b[33m=== Android SDK Auto Detection ===\x1b[0m\n");
+
+  const detected = detectAndroidStudioSdk();
+  const ANDROID_HOME =
+    process.env.ANDROID_HOME ||
+    process.env.ANDROID_SDK_ROOT ||
+    detected ||
+    DEFAULT_SDK_PATH;
+
+  console.log(`📦 Using Android SDK path: ${ANDROID_HOME}`);
+  await ensureSdk(ANDROID_HOME);
+
+  const { device } = await inquirer.prompt([
+    {
+      type: "list",
+      name: "device",
+      message: "Choose device to emulate:",
+      choices: Object.keys(DEVICE_PRESETS),
+    },
+  ]);
+
+  const preset = DEVICE_PRESETS[device];
+  const { sysImg, abi } = await installPlatformTools(ANDROID_HOME, preset.api);
+  await createAvd(ANDROID_HOME, preset, sysImg, abi);
+
+  console.log("\n✅ Setup complete!");
+}
+
+main().catch((e) => {
+  console.error("✖ ERROR:", e.message);
   process.exit(1);
 });

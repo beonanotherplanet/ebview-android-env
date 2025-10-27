@@ -6,7 +6,10 @@
   "scripts": {
     "android:webview": "node scripts/android-webview-dev.mjs"
   },
+  "dependencies": {
+    "inquirer": "^9.3.6"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }
