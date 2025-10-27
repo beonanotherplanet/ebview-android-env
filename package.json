@@ -1,0 +1,12 @@
+{
+  "name": "ebview-android-env",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "android:webview": "node scripts/android-webview-dev.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
