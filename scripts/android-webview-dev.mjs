@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 /**
- * Android AVD Auto Setup (macOS + Windows)
- * - Detect Android Studio SDK automatically
- * - Reuse existing SDK if available
- * - Download cmdline-tools only when missing
- * - Automatically chooses valid system image combinations
+ * Android AVD Auto Setup (macOS M1/M2 + Windows 10)
+ * - Detects or installs SDK automatically
+ * - Supports both arm64 (Apple Silicon) and x86_64 (Windows)
+ * - Automatically creates and launches Galaxy device AVDs
  */
 
 import inquirer from "inquirer";
@@ -16,11 +15,16 @@ import {
   writeFileSync,
   readdirSync,
 } from "node:fs";
-import { homedir, tmpdir, platform } from "node:os";
+import { homedir, tmpdir, platform, arch } from "node:os";
 import { join } from "node:path";
 import https from "node:https";
 
+/* ────────────────────────────────────────────────
+   System Info
+──────────────────────────────────────────────── */
 const isWindows = platform() === "win32";
+const isMac = platform() === "darwin";
+const cpuArch = arch(); // "arm64" or "x64"
 const HOME = homedir();
 const TMP = tmpdir();
 
@@ -34,38 +38,60 @@ const SDK_URL = isWindows
   : `https://dl.google.com/android/repository/commandlinetools-mac-${SDK_VERSION}_latest.zip`;
 
 /* ────────────────────────────────────────────────
-   Device Presets (OS 세대 반영)
+   Device Profiles
 ──────────────────────────────────────────────── */
 const DEVICE_PRESETS = {
   "Galaxy Note10": {
-    name: "Galaxy_Note10_API_31",
-    api: "android-31",
+    name: "Galaxy_Note10_API_30",
+    api: "android-30",
     res: { w: 1080, h: 2280, d: 401 },
     ram: 8192,
   },
   "Galaxy Note20": {
-    name: "Galaxy_Note20_API_31",
-    api: "android-31",
+    name: "Galaxy_Note20_API_30",
+    api: "android-30",
     res: { w: 1080, h: 2400, d: 393 },
     ram: 8192,
   },
   "Galaxy S22": {
-    name: "Galaxy_S22_API_31",
-    api: "android-31",
+    name: "Galaxy_S22_API_30",
+    api: "android-30",
     res: { w: 1080, h: 2340, d: 420 },
     ram: 8192,
   },
 };
 
 /* ────────────────────────────────────────────────
-   SDK Detection
+   Utilities
 ──────────────────────────────────────────────── */
+function run(cmd, args = [], opts = {}) {
+  return new Promise((res, rej) => {
+    const p = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
+    p.on("exit", (code) =>
+      code === 0 ? res() : rej(new Error(`${cmd} exited with code ${code}`))
+    );
+  });
+}
+
+async function downloadFile(url, dest) {
+  console.log(`[download] ${url}`);
+  await new Promise((res, rej) => {
+    const file = createWriteStream(dest);
+    https
+      .get(url, (r) => {
+        if (r.statusCode !== 200) rej(new Error(`HTTP ${r.statusCode}`));
+        r.pipe(file);
+        file.on("finish", () => file.close(res));
+      })
+      .on("error", rej);
+  });
+}
+
 function detectAndroidStudioSdk() {
   const studioPaths = [
     "/Applications/Android Studio.app/Contents",
     "C:\\Program Files\\Android\\Android Studio",
   ];
-
   for (const base of studioPaths) {
     try {
       const subdirs = readdirSync(base, { withFileTypes: true });
@@ -82,33 +108,7 @@ function detectAndroidStudioSdk() {
 }
 
 /* ────────────────────────────────────────────────
-   Utils
-──────────────────────────────────────────────── */
-async function downloadFile(url, dest) {
-  console.log(`[download] ${url}`);
-  await new Promise((res, rej) => {
-    const file = createWriteStream(dest);
-    https
-      .get(url, (r) => {
-        if (r.statusCode !== 200) rej(new Error(`HTTP ${r.statusCode}`));
-        r.pipe(file);
-        file.on("finish", () => file.close(res));
-      })
-      .on("error", rej);
-  });
-}
-
-function run(cmd, args = [], opts = {}) {
-  return new Promise((res, rej) => {
-    const c = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
-    c.on("exit", (code) =>
-      code === 0 ? res() : rej(new Error(`${cmd} exit ${code}`))
-    );
-  });
-}
-
-/* ────────────────────────────────────────────────
-   SDK Installation
+   SDK Setup
 ──────────────────────────────────────────────── */
 async function ensureSdk(androidHome) {
   const cmdlineDir = join(androidHome, "cmdline-tools", "latest");
@@ -120,6 +120,7 @@ async function ensureSdk(androidHome) {
   mkdirSync(join(androidHome, "cmdline-tools"), { recursive: true });
   const zip = join(TMP, "cmdtools.zip");
   await downloadFile(SDK_URL, zip);
+
   if (isWindows)
     await run("powershell", [
       "Expand-Archive",
@@ -129,6 +130,7 @@ async function ensureSdk(androidHome) {
     ]);
   else
     await run("unzip", ["-o", zip, "-d", join(androidHome, "cmdline-tools")]);
+
   await run("mv", [
     join(androidHome, "cmdline-tools", "cmdline-tools"),
     cmdlineDir,
@@ -137,17 +139,14 @@ async function ensureSdk(androidHome) {
 }
 
 /* ────────────────────────────────────────────────
-   Platform + System Images Installer
+   System Image Installer
 ──────────────────────────────────────────────── */
 async function installPlatformTools(androidHome, api) {
   const sdkm = isWindows
     ? join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
     : join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager");
 
-  // ✅ ABI 자동 감지
-  const abi = isWindows ? "x86_64" : "arm64-v8a";
-
-  // ✅ System image 타입 자동 결정
+  const abi = isWindows || cpuArch === "x64" ? "x86_64" : "arm64-v8a";
   const sysImg = "google_apis";
 
   const systemImagePath = `system-images;${api};${sysImg};${abi}`;
@@ -200,11 +199,15 @@ AvdId=${name}
 PlayStore.enabled=true
 abi.type=${abi}
 avd.ini.displayname=${name}
+hw.cpu.arch=${abi.includes("arm") ? "arm64" : "x86_64"}
+hw.cpu.model=qemu64
 hw.lcd.density=${res.d}
 hw.lcd.width=${res.w}
 hw.lcd.height=${res.h}
 hw.ramSize=${ram}
 hw.cpu.ncore=8
+hw.gpu.enabled=yes
+hw.gpu.mode=host
 skin.name=${res.w}x${res.h}
 image.sysdir.1=${androidHome}/system-images/${api}/${sysImg}/${abi}/
 tag.display=${sysImg}
@@ -215,7 +218,33 @@ tag.display=${sysImg}
 }
 
 /* ────────────────────────────────────────────────
-   Main
+   Emulator Launcher
+──────────────────────────────────────────────── */
+async function launchEmulator(androidHome, avdName) {
+  console.log(`🚀 Launching emulator: ${avdName}...`);
+  const emulatorCmd = isWindows
+    ? join(androidHome, "emulator", "emulator.exe")
+    : join(androidHome, "emulator", "emulator");
+
+  if (!existsSync(emulatorCmd))
+    throw new Error(`Emulator not found at: ${emulatorCmd}`);
+
+  const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
+  const accelArgs = isMac
+    ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"] // ✅ 변경됨
+    : ["-accel", "on", "-gpu", "host"];
+
+  const proc = spawn(emulatorCmd, [...baseArgs, ...accelArgs], {
+    stdio: "inherit",
+    detached: true,
+  });
+
+  proc.on("error", (err) => console.error("✖ Emulator failed:", err.message));
+  console.log("✔ Emulator process started. Booting may take ~30s.");
+}
+
+/* ────────────────────────────────────────────────
+   Main Flow
 ──────────────────────────────────────────────── */
 async function main() {
   console.log("\x1b[33m=== Android SDK Auto Detection ===\x1b[0m\n");
@@ -242,8 +271,51 @@ async function main() {
   const preset = DEVICE_PRESETS[device];
   const { sysImg, abi } = await installPlatformTools(ANDROID_HOME, preset.api);
   await createAvd(ANDROID_HOME, preset, sysImg, abi);
+  await launchEmulator(ANDROID_HOME, preset.name);
 
-  console.log("\n✅ Setup complete!");
+  console.log("\n✅ Setup complete and emulator launched!");
+
+  console.log("\n🧠 Checking Vite dev server (http://localhost:5173) ...");
+
+  // 1️⃣ Vite dev 서버 실행 (또는 감지)
+  try {
+    const res = await fetch("http://localhost:5173");
+    if (res.ok) console.log("✅ Vite dev server already running.");
+  } catch {
+    console.log("⚙️ Starting Vite dev server...");
+    spawn("npm", ["run", "dev"], {
+      cwd: join(process.cwd(), "webview"),
+      stdio: "inherit",
+      shell: true,
+      detached: true,
+    });
+    console.log("⏳ Waiting for Vite server to start...");
+    await new Promise((res) => setTimeout(res, 5000));
+  }
+
+  // 2️⃣ Android 앱 빌드 및 설치
+  console.log("\n🔧 Building Android app...");
+  const gradlew = isWindows ? "gradlew.bat" : "./gradlew";
+  await run(gradlew, ["assembleDebug"], {
+    cwd: join(process.cwd(), "android"),
+  });
+
+  console.log("📱 Installing app on emulator...");
+  await run(gradlew, ["installDebug"], { cwd: join(process.cwd(), "android") });
+
+  // 3️⃣ 앱 자동 실행
+  console.log("\n🚀 Launching WebView app...");
+  await run("adb", [
+    "shell",
+    "am",
+    "start",
+    "-n",
+    "com.ebview.android/.MainActivity",
+  ]);
+
+  console.log(
+    "\n🎉 All steps completed! WebView should now show your Vite app."
+  );
 }
 
 main().catch((e) => {
