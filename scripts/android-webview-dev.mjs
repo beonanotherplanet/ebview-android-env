@@ -5,6 +5,7 @@
  * - Supports both arm64 (Apple Silicon) and x86_64 (Windows)
  * - Automatically creates and launches Galaxy device AVDs
  * - 💡 Automatically installs Gradle + generates gradlew if missing
+ * - ✅ Windows 10 호환성 전면 교정
  */
 
 import inquirer from "inquirer";
@@ -15,17 +16,20 @@ import {
   createWriteStream,
   writeFileSync,
   readdirSync,
+  renameSync,
 } from "node:fs";
-import { homedir, tmpdir, platform, arch } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir, platform, arch, release } from "node:os";
+import { join, dirname } from "node:path";
 import https from "node:https";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
 
 /* ────────────────────────────────────────────────
    System Info
 ──────────────────────────────────────────────── */
 const isWindows = platform() === "win32";
 const isMac = platform() === "darwin";
-const cpuArch = arch(); // "arm64" or "x64"
+const isArm64 = arch() === "arm64";
 const HOME = homedir();
 const TMP = tmpdir();
 
@@ -41,7 +45,10 @@ const SDK_URL = isWindows
 /* ────────────────────────────────────────────────
    Device Profiles
 ──────────────────────────────────────────────── */
-const DEVICE_PRESETS = {
+const DEVICE_PRESETS: Record<
+  string,
+  { name: string; api: string; res: { w: number; h: number; d: number }; ram: number }
+> = {
   "Galaxy Note10": {
     name: "Galaxy_Note10_API_30",
     api: "android-30",
@@ -65,8 +72,15 @@ const DEVICE_PRESETS = {
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
-function run(cmd, args = [], opts = {}) {
-  return new Promise((res, rej) => {
+function shQuote(p: string) {
+  // 안전한 경로 인자용 인용 (윈도우/맥 모두)
+  if (p.includes(" ")) return `"${p}"`;
+  return p;
+}
+
+function run(cmd: string, args: string[] = [], opts: any = {}) {
+  // shell:true + 전체 stdio 상속 (경로 공백, .bat 호출 안전)
+  return new Promise<void>((res, rej) => {
     const p = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
     p.on("exit", (code) =>
       code === 0 ? res() : rej(new Error(`${cmd} exited with code ${code}`))
@@ -74,17 +88,16 @@ function run(cmd, args = [], opts = {}) {
   });
 }
 
-async function downloadFile(url, dest) {
+async function downloadFile(url: string, dest: string) {
   console.log(`[download] ${url}`);
 
-  await new Promise((res, rej) => {
+  await new Promise<void>((res, rej) => {
     const file = createWriteStream(dest);
 
-    function request(urlToFetch) {
+    function request(urlToFetch: string) {
       https
         .get(urlToFetch, (r) => {
-          // ✅ handle redirect (301, 302, 303, 307, 308)
-          if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+          if (r.statusCode && r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
             console.log(`↪ Redirecting to ${r.headers.location}`);
             r.resume();
             request(r.headers.location);
@@ -114,7 +127,8 @@ async function downloadFile(url, dest) {
           r.pipe(file);
           file.on("finish", () => {
             console.log("\n✅ Download complete!");
-            file.close(res);
+            file.close();
+            res();
           });
         })
         .on("error", rej);
@@ -124,11 +138,13 @@ async function downloadFile(url, dest) {
   });
 }
 
-function detectAndroidStudioSdk() {
-  const studioPaths = [
-    "/Applications/Android Studio.app/Contents",
-    "C:\\Program Files\\Android\\Android Studio",
-  ];
+function detectAndroidStudioSdk(): string | null {
+  const studioPaths = isWindows
+    ? [
+        "C:\\Program Files\\Android\\Android Studio",
+        "C:\\Program Files\\Android\\Android Studio\\jbr",
+      ]
+    : ["/Applications/Android Studio.app/Contents"];
   for (const base of studioPaths) {
     try {
       const subdirs = readdirSync(base, { withFileTypes: true });
@@ -144,62 +160,189 @@ function detectAndroidStudioSdk() {
   return null;
 }
 
+function ensureDir(p: string) {
+  if (!existsSync(p)) mkdirSync(p, { recursive: true });
+}
+
+function normalizeIniPath(p: string) {
+  // AVD config.ini는 슬래시를 선호
+  return p.replace(/\\/g, "/");
+}
+
+function getNodeMajor() {
+  const v = process.versions.node.split(".")[0];
+  return parseInt(v, 10);
+}
+
+/* ────────────────────────────────────────────────
+   Java Check (sdkmanager가 필요)
+──────────────────────────────────────────────── */
+function ensureJava17OrLater() {
+  try {
+    const out = execSync("java -version", { stdio: ["ignore", "pipe", "pipe"] })
+      .toString()
+      .trim();
+    // 보통 stderr로 버전이 나옴 → 위에선 pipe로 안전
+  } catch {
+    throw new Error(
+      "Java가 필요합니다. JDK 17+를 설치하고 JAVA_HOME/PATH를 설정한 뒤 다시 실행하세요. (Adoptium Temurin 17 권장)"
+    );
+  }
+
+  // 대략적 체크(정교한 파싱 대신 간단히)
+  const text = (() => {
+    try {
+      return execSync("java -version", { stdio: ["ignore", "pipe", "pipe"] })
+        .toString()
+        .trim();
+    } catch (e: any) {
+      return e?.stderr?.toString?.() ?? "";
+    }
+  })();
+
+  const m = text.match(/version "(.*?)"/);
+  if (m) {
+    const ver = m[1]; // 예: "17.0.11"
+    const major = parseInt(ver.split(".")[0], 10);
+    if (Number.isFinite(major) && major < 17) {
+      throw new Error(
+        `Java ${ver} 감지됨. JDK 17+ 필요합니다. (현재: ${ver})`
+      );
+    }
+  }
+}
+
 /* ────────────────────────────────────────────────
    SDK Setup
 ──────────────────────────────────────────────── */
-async function ensureSdk(androidHome) {
-  const cmdlineDir = join(androidHome, "cmdline-tools", "latest");
-  if (existsSync(cmdlineDir)) {
+async function ensureSdk(androidHome: string) {
+  const toolsBase = join(androidHome, "cmdline-tools");
+  const latestDir = join(toolsBase, "latest");
+  if (existsSync(latestDir)) {
     console.log("✔ Command-line tools already exist.");
     return;
   }
 
-  mkdirSync(join(androidHome, "cmdline-tools"), { recursive: true });
+  ensureDir(toolsBase);
   const zip = join(TMP, "cmdtools.zip");
   await downloadFile(SDK_URL, zip);
 
-  if (isWindows)
-    await run("powershell", [
-      "Expand-Archive",
-      `-Path \"${zip}\"`,
-      `-DestinationPath \"${join(androidHome, "cmdline-tools")}\"`,
-      "-Force",
-    ]);
-  else
-    await run("unzip", ["-o", zip, "-d", join(androidHome, "cmdline-tools")]);
+  if (isWindows) {
+    // Expand-Archive 뒤에 내부 폴더명이 'cmdline-tools'로 생성되므로 이동 필요
+    await run(
+      "powershell",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "Expand-Archive",
+        `-Path ${shQuote(zip)}`,
+        `-DestinationPath ${shQuote(toolsBase)}`,
+        "-Force",
+      ],
+      { windowsHide: true }
+    );
+    const extracted = join(toolsBase, "cmdline-tools");
+    ensureDir(latestDir);
+    // Windows에선 renameSync로 이동
+    try {
+      renameSync(extracted, latestDir);
+    } catch {
+      // 일부 케이스에서 이미 latest가 있으면 넘어감
+    }
+  } else {
+    await run("unzip", ["-o", zip, "-d", toolsBase]);
+    // macOS: cmdline-tools/cmdline-tools → cmdline-tools/latest
+    try {
+      renameSync(join(toolsBase, "cmdline-tools"), latestDir);
+    } catch {}
+  }
 
-  await run("mv", [
-    join(androidHome, "cmdline-tools", "cmdline-tools"),
-    cmdlineDir,
-  ]);
   console.log("✔ Installed command-line tools.");
+}
+
+/* ────────────────────────────────────────────────
+   sdkmanager helpers (licenses & installs)
+──────────────────────────────────────────────── */
+function getSdkTools(androidHome: string) {
+  const sdkm = isWindows
+    ? join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
+    : join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager");
+  const avdm = isWindows
+    ? join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager.bat")
+    : join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager");
+  const emulatorCmd = isWindows
+    ? join(androidHome, "emulator", "emulator.exe")
+    : join(androidHome, "emulator", "emulator");
+  const adb = isWindows
+    ? join(androidHome, "platform-tools", "adb.exe")
+    : join(androidHome, "platform-tools", "adb");
+  return { sdkm, avdm, emulatorCmd, adb };
+}
+
+async function acceptLicenses(androidHome: string, sdkm: string) {
+  console.log("📝 Accepting SDK licenses...");
+  if (isWindows) {
+    await run(
+      "powershell",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        `cmd /c "echo y | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses"`,
+      ],
+      { windowsHide: true }
+    );
+  } else {
+    await run("bash", [
+      "-lc",
+      `yes | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses`,
+    ]);
+  }
 }
 
 /* ────────────────────────────────────────────────
    System Image Installer
 ──────────────────────────────────────────────── */
-async function installPlatformTools(androidHome, api) {
-  const sdkm = isWindows
-    ? join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
-    : join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager");
+async function installPlatformTools(androidHome: string, api: string) {
+  const { sdkm } = getSdkTools(androidHome);
 
-  const abi = isWindows || cpuArch === "x64" ? "x86_64" : "arm64-v8a";
+  const abi = isWindows || !isArm64 ? "x86_64" : "arm64-v8a";
   const sysImg = "google_apis";
-
   const systemImagePath = `system-images;${api};${sysImg};${abi}`;
-  console.log(`📦 Installing ${systemImagePath}`);
 
-  await run(
-    sdkm,
-    [
-      `--sdk_root=${androidHome}`,
-      "platform-tools",
-      "emulator",
-      `platforms;${api}`,
-      systemImagePath,
-    ],
-    { shell: false }
-  );
+  console.log(`📦 Installing packages:
+ - platform-tools
+ - emulator
+ - platforms;${api}
+ - ${systemImagePath}
+ - extras;intel;Hardware_Accelerated_Execution_Manager (best-effort)
+ - extras;google;gdk (best-effort, device profiles)
+`);
+
+  // 필수 패키지
+  await run(shQuote(sdkm), [
+    `--sdk_root=${shQuote(androidHome)}`,
+    "platform-tools",
+    "emulator",
+    `platforms;${api}`,
+    systemImagePath,
+  ]);
+
+  // 선택(있으면 설치, 없어도 무시)
+  try {
+    await run(shQuote(sdkm), [
+      `--sdk_root=${shQuote(androidHome)}`,
+      "extras;google;gdk",
+    ]);
+  } catch {}
+
+  try {
+    await run(shQuote(sdkm), [
+      `--sdk_root=${shQuote(androidHome)}`,
+      "extras;intel;Hardware_Accelerated_Execution_Manager",
+    ]);
+  } catch {}
 
   return { sysImg, abi };
 }
@@ -207,77 +350,138 @@ async function installPlatformTools(androidHome, api) {
 /* ────────────────────────────────────────────────
    AVD Creation
 ──────────────────────────────────────────────── */
-async function createAvd(androidHome, preset, sysImg, abi) {
+async function createAvd(
+  androidHome: string,
+  preset: (typeof DEVICE_PRESETS)[keyof typeof DEVICE_PRESETS],
+  sysImg: string,
+  abi: string
+) {
   const { name, api, res, ram } = preset;
   const avdDir = join(HOME, ".android", "avd", `${name}.avd`);
+  const { avdm } = getSdkTools(androidHome);
+
   if (existsSync(avdDir)) {
     console.log("✔ AVD already exists.");
-    return;
+  } else {
+    console.log("🧩 Creating AVD (best-effort device profile)...");
+    // 우선 device 프로필을 지정해보고, 실패 시 --device 제거
+    let created = false;
+    try {
+      await run(shQuote(avdm), [
+        "create",
+        "avd",
+        "-n",
+        shQuote(name),
+        "-k",
+        shQuote(`system-images;${api};${sysImg};${abi}`),
+        "--device",
+        "pixel_5",
+        "--force",
+      ]);
+      created = true;
+    } catch {
+      console.log("ℹ️ Device profile 'pixel_5' not available. Retrying without --device...");
+      await run(shQuote(avdm), [
+        "create",
+        "avd",
+        "-n",
+        shQuote(name),
+        "-k",
+        shQuote(`system-images;${api};${sysImg};${abi}`),
+        "--force",
+      ]);
+      created = true;
+    }
+    if (!created) throw new Error("Failed to create AVD");
   }
 
-  const avdm = isWindows
-    ? join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager.bat")
-    : join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager");
+  // config.ini 강제 세팅(경로/해상도/램 등)
+  ensureDir(avdDir);
+  const ini = [
+    `AvdId=${name}`,
+    `PlayStore.enabled=true`,
+    `abi.type=${abi}`,
+    `avd.ini.displayname=${name}`,
+    `hw.cpu.arch=${abi.includes("arm") ? "arm64" : "x86_64"}`,
+    `hw.cpu.model=qemu64`,
+    `hw.lcd.density=${res.d}`,
+    `hw.lcd.width=${res.w}`,
+    `hw.lcd.height=${res.h}`,
+    `hw.ramSize=${ram}`,
+    `hw.cpu.ncore=8`,
+    `hw.gpu.enabled=yes`,
+    `hw.gpu.mode=host`,
+    `skin.name=${res.w}x${res.h}`,
+    `image.sysdir.1=${normalizeIniPath(
+      join(androidHome, "system-images", api, sysImg, abi)
+    )}/`,
+    `tag.display=${sysImg}`,
+  ].join("\n");
 
-  await run(avdm, [
-    "create",
-    "avd",
-    "-n",
-    name,
-    "-k",
-    `system-images;${api};${sysImg};${abi}`,
-    "--device",
-    "pixel_5",
-    "--force",
-  ]);
-
-  const config = `
-AvdId=${name}
-PlayStore.enabled=true
-abi.type=${abi}
-avd.ini.displayname=${name}
-hw.cpu.arch=${abi.includes("arm") ? "arm64" : "x86_64"}
-hw.cpu.model=qemu64
-hw.lcd.density=${res.d}
-hw.lcd.width=${res.w}
-hw.lcd.height=${res.h}
-hw.ramSize=${ram}
-hw.cpu.ncore=8
-hw.gpu.enabled=yes
-hw.gpu.mode=host
-skin.name=${res.w}x${res.h}
-image.sysdir.1=${androidHome}/system-images/${api}/${sysImg}/${abi}/
-tag.display=${sysImg}
-  `.trim();
-
-  writeFileSync(join(avdDir, "config.ini"), config);
-  console.log(`✔ Created AVD for ${name}`);
+  writeFileSync(join(avdDir, "config.ini"), ini, "utf8");
+  console.log(`✔ Created/updated AVD config for ${name}`);
 }
 
 /* ────────────────────────────────────────────────
    Emulator Launcher
 ──────────────────────────────────────────────── */
-async function launchEmulator(androidHome, avdName) {
+async function launchEmulator(androidHome: string, avdName: string) {
   console.log(`🚀 Launching emulator: ${avdName}...`);
-  const emulatorCmd = isWindows
-    ? join(androidHome, "emulator", "emulator.exe")
-    : join(androidHome, "emulator", "emulator");
+  const { emulatorCmd } = getSdkTools(androidHome);
 
-  if (!existsSync(emulatorCmd))
+  if (!existsSync(emulatorCmd)) {
     throw new Error(`Emulator not found at: ${emulatorCmd}`);
+  }
 
   const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
   const accelArgs = isMac
     ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"]
-    : ["-accel", "on", "-gpu", "host"];
+    : ["-accel", "on", "-gpu", "host"]; // Windows는 WHPX 사용(기기 지원 시)
 
-  const proc = spawn(emulatorCmd, [...baseArgs, ...accelArgs], {
+  const proc = spawn(shQuote(emulatorCmd), [...baseArgs, ...accelArgs], {
     stdio: "inherit",
     detached: true,
+    shell: true,
   });
 
   proc.on("error", (err) => console.error("✖ Emulator failed:", err.message));
   console.log("✔ Emulator process started. Booting may take ~30s.");
+}
+
+/* ────────────────────────────────────────────────
+   Helpers: Vite dev server probing
+──────────────────────────────────────────────── */
+async function ensureViteDevServer() {
+  console.log("\n🧠 Checking Vite dev server (http://localhost:5173) ...");
+  const nodeMajor = getNodeMajor();
+  const canFetch = typeof fetch === "function";
+  if (!canFetch && nodeMajor < 18) {
+    console.log(
+      "ℹ️ Node 18+ 권장(내장 fetch 사용). 현재 환경에선 Vite 서버 자동감지 없이 바로 실행을 시도합니다."
+    );
+  }
+
+  let ok = false;
+  if (canFetch) {
+    try {
+      const res = await fetch("http://localhost:5173");
+      if (res.ok) ok = true;
+    } catch {}
+  }
+
+  if (!ok) {
+    console.log("⚙️ Starting Vite dev server...");
+    spawn("npm", ["run", "dev"], {
+      cwd: join(process.cwd(), "webview"),
+      stdio: "inherit",
+      shell: true,
+      detached: true,
+    });
+    console.log("⏳ Waiting for Vite server to start...");
+    await new Promise((res) => setTimeout(res, 7000));
+  } else {
+    console.log("✅ Vite dev server already running.");
+  }
 }
 
 /* ────────────────────────────────────────────────
@@ -286,6 +490,13 @@ async function launchEmulator(androidHome, avdName) {
 async function main() {
   console.log("\x1b[33m=== Android SDK Auto Detection ===\x1b[0m\n");
 
+  if (isWindows) {
+    console.log(`ℹ️ Windows ${release()}`);
+  }
+
+  // Java 필요(sdkmanager)
+  ensureJava17OrLater();
+
   const detected = detectAndroidStudioSdk();
   const ANDROID_HOME =
     process.env.ANDROID_HOME ||
@@ -293,8 +504,13 @@ async function main() {
     detected ||
     DEFAULT_SDK_PATH;
 
+  ensureDir(ANDROID_HOME);
   console.log(`📦 Using Android SDK path: ${ANDROID_HOME}`);
   await ensureSdk(ANDROID_HOME);
+
+  // sdkmanager 라이선스 동의
+  const { sdkm } = getSdkTools(ANDROID_HOME);
+  await acceptLicenses(ANDROID_HOME, sdkm);
 
   const { device } = await inquirer.prompt([
     {
@@ -307,28 +523,13 @@ async function main() {
 
   const preset = DEVICE_PRESETS[device];
   const { sysImg, abi } = await installPlatformTools(ANDROID_HOME, preset.api);
+
   await createAvd(ANDROID_HOME, preset, sysImg, abi);
   await launchEmulator(ANDROID_HOME, preset.name);
 
   console.log("\n✅ Setup complete and emulator launched!");
 
-  console.log("\n🧠 Checking Vite dev server (http://localhost:5173) ...");
-
-  // 1️⃣ Vite dev 서버 실행 (또는 감지)
-  try {
-    const res = await fetch("http://localhost:5173");
-    if (res.ok) console.log("✅ Vite dev server already running.");
-  } catch {
-    console.log("⚙️ Starting Vite dev server...");
-    spawn("npm", ["run", "dev"], {
-      cwd: join(process.cwd(), "webview"),
-      stdio: "inherit",
-      shell: true,
-      detached: true,
-    });
-    console.log("⏳ Waiting for Vite server to start...");
-    await new Promise((res) => setTimeout(res, 5000));
-  }
+  await ensureViteDevServer();
 
   const apkPath = join(process.cwd(), "app-debug.apk");
   if (!existsSync(apkPath)) {
@@ -336,16 +537,14 @@ async function main() {
     process.exit(1);
   }
 
-  const adb = isWindows
-    ? join(ANDROID_HOME, "platform-tools", "adb.exe")
-    : join(ANDROID_HOME, "platform-tools", "adb");
+  const { adb } = getSdkTools(ANDROID_HOME);
 
   console.log("📱 Installing APK...");
-  await run(adb, ["install", "-r", apkPath]);
+  await run(shQuote(adb), ["install", "-r", shQuote(apkPath)]);
 
-  // 3️⃣ 앱 자동 실행
+  // 앱 자동 실행 (✨ 모든 ADB 호출은 절대경로 사용)
   console.log("\n🚀 Launching WebView app...");
-  await run("adb", [
+  await run(shQuote(adb), [
     "shell",
     "am",
     "start",
@@ -353,33 +552,51 @@ async function main() {
     "com.ebview.android/.MainActivity",
   ]);
 
-  // console.log("\n🌐 Setting up Chrome remote debugging...");
+  console.log("\n🌐 Setting up Chrome remote debugging...");
+  try {
+    // WebView 디버거 포트 포워딩
+    await run(shQuote(adb), [
+      "forward",
+      "tcp:9222",
+      "localabstract:chrome_devtools_remote",
+    ]);
 
-  // // 4️⃣ WebView 디버깅 포트 연결
-  // try {
-  //   // WebView 디버거 포트 포워딩
-  //   execSync(`${adb} forward tcp:9222 localabstract:chrome_devtools_remote`, {
-  //     stdio: "inherit",
-  //   });
+    // Vite 개발 서버 reverse
+    await run(shQuote(adb), ["reverse", "tcp:5173", "tcp:5173"]);
 
-  //   // Vite 개발 서버 연결
-  //   execSync(`${adb} reverse tcp:5173 tcp:5173`, { stdio: "inherit" });
+    // Chrome DevTools 열기(실패해도 계속)
+    console.log("🧭 Opening Chrome debugger...");
+    if (isWindows) {
+      // 크롬 PATH가 없으면 실패할 수 있음 → 실패해도 무시
+      try {
+        spawn("cmd", ["/c", "start", "chrome", "chrome://inspect/#devices"], {
+          detached: true,
+          windowsHide: true,
+          shell: true,
+        });
+      } catch {}
+      console.log(
+        "ℹ️ Chrome이 자동으로 안 열리면 수동으로 chrome://inspect/#devices 를 열어주세요."
+      );
+    } else if (isMac) {
+      try {
+        spawn("open", ["-a", "Google Chrome", "chrome://inspect/#devices"], {
+          detached: true,
+          shell: true,
+        });
+      } catch {}
+      console.log(
+        "ℹ️ 자동으로 안 열리면 수동으로 chrome://inspect/#devices 를 여세요."
+      );
+    }
 
-  //   // Chrome 디버거 열기
-  //   console.log("🧭 Opening Chrome debugger...");
-  //   if (isWindows)
-  //     spawn("cmd", ["/c", "start", "chrome", "chrome://inspect/#devices"], {
-  //       detached: true,
-  //     });
-  //   else if (isMac)
-  //     spawn("open", ["-a", "Google Chrome", "chrome://inspect/#devices"], {
-  //       detached: true,
-  //     });
-
-  //   console.log("✅ Chrome DevTools opened. You can now inspect your WebView.");
-  // } catch (err) {
-  //   console.error("⚠️ Failed to open Chrome DevTools:", err.message);
-  // }
+    console.log("✅ Chrome DevTools ready. You can now inspect your WebView.");
+  } catch (err: any) {
+    console.error("⚠️ Failed to open Chrome DevTools:", err?.message ?? err);
+    console.log(
+      "ℹ️ chrome://inspect/#devices 를 수동으로 열고, ADB 포워딩이 되었는지 확인하세요."
+    );
+  }
 
   console.log(
     "\n🎉 All steps completed! WebView should now show your Vite app."
