@@ -19,7 +19,7 @@ import {
   renameSync,
 } from "node:fs";
 import { homedir, tmpdir, platform, arch, release } from "node:os";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import https from "node:https";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
@@ -77,7 +77,142 @@ const DEVICE_PRESETS: Record<
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
-// === SDK tool resolver ===
+function shQuote(p: string): string {
+  return p.includes(" ") ? `"${p}"` : p;
+}
+
+function ensureDir(p: string): void {
+  if (!existsSync(p)) mkdirSync(p, { recursive: true });
+}
+
+function normalizeIniPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+function getNodeMajor(): number {
+  const v = process.versions.node.split(".")[0];
+  return parseInt(v, 10);
+}
+
+function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
+  return new Promise<void>((res, rej) => {
+    const p = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
+    p.on("exit", (code) =>
+      code === 0 ? res() : rej(new Error(`${cmd} exited with code ${code}`))
+    );
+  });
+}
+
+async function downloadFile(url: string, dest: string): Promise<void> {
+  console.log(`[download] ${url}`);
+  await new Promise<void>((res, rej) => {
+    const file = createWriteStream(dest);
+    function request(urlToFetch: string) {
+      https
+        .get(urlToFetch, (r) => {
+          if (
+            r.statusCode &&
+            r.statusCode >= 300 &&
+            r.statusCode < 400 &&
+            r.headers.location
+          ) {
+            console.log(`↪ Redirecting to ${r.headers.location}`);
+            r.resume();
+            request(r.headers.location);
+            return;
+          }
+          if (r.statusCode !== 200) {
+            rej(new Error(`HTTP ${r.statusCode} for ${urlToFetch}`));
+            return;
+          }
+          const total = parseInt(r.headers["content-length"] || "0", 10);
+          let downloaded = 0;
+          let lastPercent = 0;
+          r.on("data", (chunk) => {
+            downloaded += chunk.length;
+            if (total > 0) {
+              const percent = Math.floor((downloaded / total) * 100);
+              if (percent !== lastPercent && percent % 2 === 0) {
+                process.stdout.write(`\r📦 Downloading... ${percent}%`);
+                lastPercent = percent;
+              }
+            }
+          });
+          r.pipe(file);
+          file.on("finish", () => {
+            console.log("\n✅ Download complete!");
+            file.close();
+            res();
+          });
+        })
+        .on("error", rej);
+    }
+    request(url);
+  });
+}
+
+function detectAndroidStudioSdk(): string | null {
+  const studioPaths = isWindows
+    ? [
+        "C:\\Program Files\\Android\\Android Studio",
+        "C:\\Program Files\\Android\\Android Studio\\jbr",
+      ]
+    : ["/Applications/Android Studio.app/Contents"];
+  for (const base of studioPaths) {
+    try {
+      const subdirs = readdirSync(base, { withFileTypes: true });
+      for (const d of subdirs) {
+        if (d.name.toLowerCase().includes("sdk")) {
+          const sdkPath = join(base, d.name);
+          console.log(`✅ Found Android Studio SDK at: ${sdkPath}`);
+          return sdkPath;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+/* ────────────────────────────────────────────────
+   PowerShell helpers (lint-safe)
+──────────────────────────────────────────────── */
+function psq(s: string): string {
+  // PowerShell literal single quotes: escape ' → ''
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+async function runPSScript(
+  scriptContent: string,
+  opts: { env?: NodeJS.ProcessEnv } = {}
+): Promise<void> {
+  const psPath = join(TMP, `__tmp_${Date.now()}.ps1`);
+  writeFileSync(psPath, scriptContent, "utf8");
+  try {
+    await run(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psPath],
+      opts
+    );
+  } finally {
+    try {
+      require("node:fs").unlinkSync(psPath);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function mergedEnv(
+  extra: Record<string, string | undefined>
+): NodeJS.ProcessEnv {
+  return { ...process.env, ...extra };
+}
+
+/* ────────────────────────────────────────────────
+   SDK Tool Resolver (robust)
+──────────────────────────────────────────────── */
 function findFileRecursive(
   root: string,
   target: string,
@@ -107,10 +242,9 @@ function findFileRecursive(
 function resolveSdkTool(
   androidHome: string,
   name: "sdkmanager" | "avdmanager" | "emulator" | "adb"
-) {
+): string | null {
   const isBat = isWindows && (name === "sdkmanager" || name === "avdmanager");
   const isExe = isWindows && (name === "emulator" || name === "adb");
-
   const file = isBat ? `${name}.bat` : isExe ? `${name}.exe` : name;
 
   const candidates = [
@@ -119,153 +253,64 @@ function resolveSdkTool(
     join(androidHome, "emulator", file),
     join(androidHome, "platform-tools", file),
   ];
+  for (const c of candidates) if (existsSync(c)) return c;
 
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  // 마지막 수단: 전체 SDK 경로에서 재귀 탐색
-  const hit = findFileRecursive(androidHome, file, 5);
-  return hit ?? null;
+  return findFileRecursive(androidHome, file, 5);
 }
 
-function shQuote(p: string) {
-  // 안전한 경로 인자용 인용 (윈도우/맥 모두)
-  if (p.includes(" ")) return `"${p}"`;
-  return p;
+/** non-throwing getter */
+function getSdkTools(androidHome: string) {
+  const sdkm = resolveSdkTool(androidHome, "sdkmanager");
+  const avdm = resolveSdkTool(androidHome, "avdmanager");
+  const emulatorCmd = resolveSdkTool(androidHome, "emulator");
+  const adb = resolveSdkTool(androidHome, "adb");
+  return { sdkm, avdm, emulatorCmd, adb };
 }
 
-// 파일 상단 유틸 섹션 근처에 추가
-function psq(s: string): string {
-  // PowerShell 단일따옴표 리터럴('...')로 안전 포장
-  // 내부 ' → '' 로 이스케이프
-  return `'${s.replace(/'/g, "''")}'`;
-}
+/* ────────────────────────────────────────────────
+   Java (Windows): auto-install + JAVA_HOME resolve
+──────────────────────────────────────────────── */
+function findWindowsJavaHome(): string | null {
+  const candidates: string[] = [];
+  if (process.env.JAVA_HOME) candidates.push(process.env.JAVA_HOME);
 
-async function runPSScript(scriptContent: string, opts: any = {}) {
-  const psPath = join(TMP, `__tmp_${Date.now()}.ps1`);
-  writeFileSync(psPath, scriptContent, "utf8");
-  try {
-    await run(
-      "powershell",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psPath],
-      opts
-    );
-  } finally {
+  const roots = [
+    "C:\\Program Files\\Eclipse Adoptium",
+    "C:\\Program Files\\Java",
+    "C:\\Program Files\\Microsoft",
+  ];
+  for (const root of roots) {
     try {
-      require("node:fs").unlinkSync(psPath);
-    } catch {}
-  }
-}
-
-function mergedEnv(extra: Record<string, string>) {
-  return { ...process.env, ...extra };
-}
-
-function run(cmd: string, args: string[] = [], opts: any = {}) {
-  // shell:true + 전체 stdio 상속 (경로 공백, .bat 호출 안전)
-  return new Promise<void>((res, rej) => {
-    const p = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
-    p.on("exit", (code) =>
-      code === 0 ? res() : rej(new Error(`${cmd} exited with code ${code}`))
-    );
-  });
-}
-
-async function downloadFile(url: string, dest: string) {
-  console.log(`[download] ${url}`);
-
-  await new Promise<void>((res, rej) => {
-    const file = createWriteStream(dest);
-
-    function request(urlToFetch: string) {
-      https
-        .get(urlToFetch, (r) => {
-          if (
-            r.statusCode &&
-            r.statusCode >= 300 &&
-            r.statusCode < 400 &&
-            r.headers.location
-          ) {
-            console.log(`↪ Redirecting to ${r.headers.location}`);
-            r.resume();
-            request(r.headers.location);
-            return;
-          }
-
-          if (r.statusCode !== 200) {
-            rej(new Error(`HTTP ${r.statusCode} for ${urlToFetch}`));
-            return;
-          }
-
-          const total = parseInt(r.headers["content-length"] || "0", 10);
-          let downloaded = 0;
-          let lastPercent = 0;
-
-          r.on("data", (chunk) => {
-            downloaded += chunk.length;
-            if (total > 0) {
-              const percent = Math.floor((downloaded / total) * 100);
-              if (percent !== lastPercent && percent % 2 === 0) {
-                process.stdout.write(`\r📦 Downloading... ${percent}%`);
-                lastPercent = percent;
-              }
-            }
-          });
-
-          r.pipe(file);
-          file.on("finish", () => {
-            console.log("\n✅ Download complete!");
-            file.close();
-            res();
-          });
-        })
-        .on("error", rej);
-    }
-
-    request(url);
-  });
-}
-
-function detectAndroidStudioSdk(): string | null {
-  const studioPaths = isWindows
-    ? [
-        "C:\\Program Files\\Android\\Android Studio",
-        "C:\\Program Files\\Android\\Android Studio\\jbr",
-      ]
-    : ["/Applications/Android Studio.app/Contents"];
-  for (const base of studioPaths) {
-    try {
-      const subdirs = readdirSync(base, { withFileTypes: true });
-      for (const d of subdirs) {
-        if (d.name.toLowerCase().includes("sdk")) {
-          const sdkPath = join(base, d.name);
-          console.log(`✅ Found Android Studio SDK at: ${sdkPath}`);
-          return sdkPath;
+      const items = readdirSync(root, { withFileTypes: true });
+      for (const it of items) {
+        if (!it.isDirectory()) continue;
+        const name = it.name.toLowerCase();
+        if (name.startsWith("jdk-17")) {
+          candidates.push(join(root, it.name));
         }
       }
-    } catch (_) {}
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const preferred = [
+    /^c:\\program files\\eclipse adoptium\\jdk-17/i,
+    /^c:\\program files\\java\\jdk-17/i,
+    /^c:\\program files\\microsoft\\.*jdk-17/i,
+  ];
+
+  for (const re of preferred) {
+    const hit = candidates.find((p) => re.test(p));
+    if (hit && existsSync(join(hit, "bin", "java.exe"))) return hit;
+  }
+  for (const p of candidates) {
+    if (existsSync(join(p, "bin", "java.exe"))) return p;
   }
   return null;
 }
 
-function ensureDir(p: string) {
-  if (!existsSync(p)) mkdirSync(p, { recursive: true });
-}
-
-function normalizeIniPath(p: string) {
-  // AVD config.ini는 슬래시를 선호
-  return p.replace(/\\/g, "/");
-}
-
-function getNodeMajor() {
-  const v = process.versions.node.split(".")[0];
-  return parseInt(v, 10);
-}
-
-/* ────────────────────────────────────────────────
-   Java Check (자동 설치 포함, Windows 전용)
-──────────────────────────────────────────────── */
-async function ensureJava17OrLater() {
+async function ensureJava17OrLater(): Promise<void> {
   let hasJava = false;
   let versionText = "";
 
@@ -290,24 +335,22 @@ async function ensureJava17OrLater() {
         return;
       }
     }
-    console.log(`⚠️ Java 감지됨 (${versionText}) 하지만 버전이 17 미만입니다.`);
+    console.log(`⚠️ Java 감지됨 (${versionText}) 하지만 17 미만입니다.`);
   } else {
     console.log("❌ Java not found.");
   }
 
-  // ────────────────────────────────────────────────
-  // JDK 17 Temurin 자동 설치 (Adoptium 공식 배포판)
-  // ────────────────────────────────────────────────
-  console.log("⬇️ Installing Temurin JDK 17 (Adoptium) ...");
+  if (!isWindows) {
+    throw new Error("Java JDK 17+ is required. Please install JDK 17+.");
+  }
 
+  // Temurin 17 무인 설치 (고정 URL)
+  console.log("⬇️ Installing Temurin JDK 17 (Adoptium) ...");
   const installerUrl =
     "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jdk_x64_windows_hotspot_17.0.13_11.msi";
   const installerPath = join(TMP, "temurin17.msi");
-
   await downloadFile(installerUrl, installerPath);
 
-  // PowerShell을 통한 무인 설치 (조용히)
-  console.log("⚙️ Running installer...");
   try {
     await run("powershell", [
       "-NoProfile",
@@ -317,51 +360,32 @@ async function ensureJava17OrLater() {
     ]);
   } catch (e) {
     console.error("JDK 설치 중 오류 발생:", e);
-    throw new Error("JDK 17 설치 실패. 수동 설치를 시도하세요.");
+    throw new Error("JDK 17 설치 실패");
   }
 
-  console.log("✅ JDK 17 installed successfully.");
-
-  // ────────────────────────────────────────────────
-  // JAVA_HOME 및 PATH 설정 (임시 반영)
-  // ────────────────────────────────────────────────
-  const possibleHomes = [
-    "C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.13.11-hotspot",
-    "C:\\Program Files\\Eclipse Adoptium\\jdk-17",
-  ];
-
-  let javaHome = null;
-  for (const path of possibleHomes) {
-    if (existsSync(path)) {
-      javaHome = path;
-      break;
-    }
-  }
-
+  const javaHome = findWindowsJavaHome();
   if (javaHome) {
     process.env.JAVA_HOME = javaHome;
     process.env.PATH = `${join(javaHome, "bin")};${process.env.PATH}`;
     console.log(`📦 JAVA_HOME set to: ${javaHome}`);
   } else {
-    console.warn(
-      "⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다. 수동으로 환경 변수를 설정해주세요."
-    );
+    console.warn("⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다.");
   }
 }
 
 /* ────────────────────────────────────────────────
-   SDK Setup
+   SDK Setup (zip 구조 꼬임 자동 교정)
 ──────────────────────────────────────────────── */
-async function ensureSdk(androidHome: string) {
+async function ensureSdk(androidHome: string): Promise<void> {
   const toolsBase = join(androidHome, "cmdline-tools");
   const latestDir = join(toolsBase, "latest");
+  const sdkBin = join(
+    latestDir,
+    "bin",
+    isWindows ? "sdkmanager.bat" : "sdkmanager"
+  );
 
-  // 이미 정상 설치됨
-  if (
-    existsSync(
-      join(latestDir, "bin", isWindows ? "sdkmanager.bat" : "sdkmanager")
-    )
-  ) {
+  if (existsSync(sdkBin)) {
     console.log("✔ Command-line tools already exist.");
     return;
   }
@@ -385,18 +409,12 @@ async function ensureSdk(androidHome: string) {
       { windowsHide: true }
     );
 
-    // 가능한 폴더 구조 정리:
-    // 1) cmdline-tools\cmdline-tools\bin\...
-    // 2) cmdline-tools\bin\...
-    // 3) 기타 변종
     const inner = join(toolsBase, "cmdline-tools");
     ensureDir(latestDir);
     try {
       if (existsSync(join(inner, "bin"))) {
-        // 구조 2) → inner를 latest로 승격
         renameSync(inner, latestDir);
       } else if (existsSync(join(inner, "cmdline-tools", "bin"))) {
-        // 구조 1) → inner\cmdline-tools 를 latest로 승격
         renameSync(join(inner, "cmdline-tools"), latestDir);
       }
     } catch {
@@ -416,7 +434,6 @@ async function ensureSdk(androidHome: string) {
     }
   }
 
-  // 끝으로 존재 확인
   const sdkPath = resolveSdkTool(androidHome, "sdkmanager");
   if (!sdkPath) {
     throw new Error(
@@ -427,25 +444,8 @@ async function ensureSdk(androidHome: string) {
 }
 
 /* ────────────────────────────────────────────────
-   sdkmanager helpers (licenses & installs)
+   Licenses (PowerShell-safe)
 ──────────────────────────────────────────────── */
-function getSdkTools(androidHome: string) {
-  const sdkm = resolveSdkTool(androidHome, "sdkmanager");
-  const avdm = resolveSdkTool(androidHome, "avdmanager");
-  const emulatorCmd = resolveSdkTool(androidHome, "emulator");
-  const adb = resolveSdkTool(androidHome, "adb");
-
-  if (!sdkm) throw new Error("sdkmanager not found after installation.");
-  if (!avdm) throw new Error("avdmanager not found after installation.");
-  if (!emulatorCmd) throw new Error("emulator not found after installation.");
-  if (!adb) throw new Error("adb not found after installation.");
-
-  return { sdkm, avdm, emulatorCmd, adb };
-}
-
-// ────────────────────────────────────────────────
-// sdkmanager 라이선스 동의 (Windows 파이프/따옴표 이슈 해결판)
-// ────────────────────────────────────────────────
 async function acceptLicenses(
   androidHome: string,
   sdkm: string
@@ -453,23 +453,18 @@ async function acceptLicenses(
   console.log("📝 Accepting SDK licenses...");
 
   if (isWindows) {
-    // PowerShell 스크립트를 라인 배열로 구성 → join으로 안전한 문자열 생성
     const psLines: string[] = [
       "$ErrorActionPreference = 'Stop'",
       `$sdk  = ${psq(sdkm)}`,
       `$root = ${psq(androidHome)}`,
       'if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }',
       "try { Unblock-File -Path $sdk } catch {}",
-      // 버전 출력(디버깅)
       "& $sdk --sdk_root=$root --version | Out-Host",
-      // 'y' 50회 생성해서 파이프 (yes 대체)
       "$yes = @()",
       "1..50 | ForEach-Object { $yes += 'y' }",
       '$yes -join "`n" | & $sdk --sdk_root=$root --licenses | Out-Host',
     ];
-    const script = psLines.join("\r\n");
-
-    await runPSScript(script, {
+    await runPSScript(psLines.join("\r\n"), {
       env: mergedEnv({
         ANDROID_HOME: androidHome,
         ANDROID_SDK_ROOT: androidHome,
@@ -478,7 +473,6 @@ async function acceptLicenses(
     return;
   }
 
-  // mac/Linux 경로 (기존 유지)
   await run("bash", [
     "-lc",
     `yes | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses`,
@@ -486,10 +480,41 @@ async function acceptLicenses(
 }
 
 /* ────────────────────────────────────────────────
-   System Image Installer
+   Packages Installer (emulator 포함)
 ──────────────────────────────────────────────── */
+async function ensureEmulatorInstalled(androidHome: string): Promise<void> {
+  const { sdkm } = getSdkTools(androidHome);
+  if (!sdkm)
+    throw new Error(
+      "sdkmanager not found. cmdline-tools 설치를 먼저 확인하세요."
+    );
+
+  if (isWindows) {
+    const ps = [
+      "$ErrorActionPreference = 'Stop'",
+      `$sdk  = ${psq(sdkm)}`,
+      `$root = ${psq(androidHome)}`,
+      "try { Unblock-File -Path $sdk } catch {}",
+      `& $sdk --sdk_root=$root "emulator" "platform-tools" | Out-Host`,
+    ].join("\r\n");
+    await runPSScript(ps, {
+      env: mergedEnv({
+        ANDROID_HOME: androidHome,
+        ANDROID_SDK_ROOT: androidHome,
+      }),
+    });
+  } else {
+    await run(sdkm, [
+      `--sdk_root=${androidHome}`,
+      "emulator",
+      "platform-tools",
+    ]);
+  }
+}
+
 async function installPlatformTools(androidHome: string, api: string) {
   const { sdkm } = getSdkTools(androidHome);
+  if (!sdkm) throw new Error("sdkmanager not found after installation.");
 
   const abi = isWindows || !isArm64 ? "x86_64" : "arm64-v8a";
   const sysImg = "google_apis";
@@ -505,16 +530,18 @@ async function installPlatformTools(androidHome: string, api: string) {
 `);
 
   if (isWindows) {
-    const psInstall = (pkgs: string[]) => `
-$ErrorActionPreference = 'Stop'
-$sdk = "${psq(sdkm)}"
-$root = "${psq(androidHome)}"
-if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }
-try { Unblock-File -Path $sdk } catch {}
-& $sdk --sdk_root=$root ${pkgs.map((p) => `"${p}"`).join(" ")} | Out-Host
-`;
+    const psInstall = (pkgs: string[]) =>
+      [
+        "$ErrorActionPreference = 'Stop'",
+        `$sdk  = ${psq(sdkm)}`,
+        `$root = ${psq(androidHome)}`,
+        'if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }',
+        "try { Unblock-File -Path $sdk } catch {}",
+        `& $sdk --sdk_root=$root ${pkgs
+          .map((p) => `"${p}"`)
+          .join(" ")} | Out-Host`,
+      ].join("\r\n");
 
-    // 필수 패키지
     await runPSScript(
       psInstall([
         "platform-tools",
@@ -530,7 +557,6 @@ try { Unblock-File -Path $sdk } catch {}
       }
     );
 
-    // 선택 패키지 (있으면 설치)
     try {
       await runPSScript(psInstall(["extras;google;gdk"]), {
         env: mergedEnv({
@@ -538,7 +564,9 @@ try { Unblock-File -Path $sdk } catch {}
           ANDROID_SDK_ROOT: androidHome,
         }),
       });
-    } catch {}
+    } catch {
+      /* ignore */
+    }
     try {
       await runPSScript(
         psInstall(["extras;intel;Hardware_Accelerated_Execution_Manager"]),
@@ -549,9 +577,10 @@ try { Unblock-File -Path $sdk } catch {}
           }),
         }
       );
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   } else {
-    // 기존 mac/linux 로직 유지
     await run(shQuote(sdkm), [
       `--sdk_root=${shQuote(androidHome)}`,
       "platform-tools",
@@ -588,12 +617,12 @@ async function createAvd(
   const { name, api, res, ram } = preset;
   const avdDir = join(HOME, ".android", "avd", `${name}.avd`);
   const { avdm } = getSdkTools(androidHome);
+  if (!avdm) throw new Error("avdmanager not found after installation.");
 
   if (existsSync(avdDir)) {
     console.log("✔ AVD already exists.");
   } else {
     console.log("🧩 Creating AVD (best-effort device profile)...");
-    // 우선 device 프로필을 지정해보고, 실패 시 --device 제거
     let created = false;
     try {
       await run(shQuote(avdm), [
@@ -626,7 +655,6 @@ async function createAvd(
     if (!created) throw new Error("Failed to create AVD");
   }
 
-  // config.ini 강제 세팅(경로/해상도/램 등)
   ensureDir(avdDir);
   const ini = [
     `AvdId=${name}`,
@@ -648,26 +676,39 @@ async function createAvd(
     )}/`,
     `tag.display=${sysImg}`,
   ].join("\n");
-
   writeFileSync(join(avdDir, "config.ini"), ini, "utf8");
   console.log(`✔ Created/updated AVD config for ${name}`);
 }
 
 /* ────────────────────────────────────────────────
-   Emulator Launcher
+   Emulator Launcher (auto-install if missing)
 ──────────────────────────────────────────────── */
 async function launchEmulator(androidHome: string, avdName: string) {
   console.log(`🚀 Launching emulator: ${avdName}...`);
-  const { emulatorCmd } = getSdkTools(androidHome);
+  let { emulatorCmd } = getSdkTools(androidHome);
 
-  if (!existsSync(emulatorCmd)) {
-    throw new Error(`Emulator not found at: ${emulatorCmd}`);
+  if (!emulatorCmd) {
+    console.log("ℹ️ Emulator binary not found. Installing emulator package...");
+    await ensureEmulatorInstalled(androidHome);
+    ({ emulatorCmd } = getSdkTools(androidHome));
+  }
+  if (!emulatorCmd) {
+    throw new Error("emulator not found after installation");
+  }
+
+  if (isWindows) {
+    const ps = [
+      "$ErrorActionPreference = 'Stop'",
+      `$emu = ${psq(emulatorCmd)}`,
+      "try { Unblock-File -Path $emu } catch {}",
+    ].join("\r\n");
+    await runPSScript(ps);
   }
 
   const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
   const accelArgs = isMac
     ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"]
-    : ["-accel", "on", "-gpu", "host"]; // Windows는 WHPX 사용(기기 지원 시)
+    : ["-accel", "on", "-gpu", "host"];
 
   const proc = spawn(shQuote(emulatorCmd), [...baseArgs, ...accelArgs], {
     stdio: "inherit",
@@ -697,7 +738,9 @@ async function ensureViteDevServer() {
     try {
       const res = await fetch("http://localhost:5173");
       if (res.ok) ok = true;
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }
 
   if (!ok) {
@@ -721,13 +764,12 @@ async function ensureViteDevServer() {
 async function main() {
   console.log("\x1b[33m=== Android SDK Auto Detection ===\x1b[0m\n");
 
-  if (isWindows) {
-    console.log(`ℹ️ Windows ${release()}`);
-  }
+  if (isWindows) console.log(`ℹ️ Windows ${release()}`);
 
-  // Java 필요(sdkmanager)
-  ensureJava17OrLater();
+  // 1) Java 필요(sdkmanager) — 반드시 await
+  await ensureJava17OrLater();
 
+  // 2) ANDROID_HOME 결정
   const detected = detectAndroidStudioSdk();
   const ANDROID_HOME =
     process.env.ANDROID_HOME ||
@@ -737,12 +779,16 @@ async function main() {
 
   ensureDir(ANDROID_HOME);
   console.log(`📦 Using Android SDK path: ${ANDROID_HOME}`);
+
+  // 3) cmdline-tools 설치/정규화
   await ensureSdk(ANDROID_HOME);
 
-  // sdkmanager 라이선스 동의
+  // 4) sdkmanager 라이선스 동의
   const { sdkm } = getSdkTools(ANDROID_HOME);
+  if (!sdkm) throw new Error("sdkmanager not found");
   await acceptLicenses(ANDROID_HOME, sdkm);
 
+  // 5) 디바이스 선택 및 시스템 이미지 설치
   const { device } = await inquirer.prompt([
     {
       type: "list",
@@ -751,29 +797,30 @@ async function main() {
       choices: Object.keys(DEVICE_PRESETS),
     },
   ]);
-
   const preset = DEVICE_PRESETS[device];
   const { sysImg, abi } = await installPlatformTools(ANDROID_HOME, preset.api);
 
+  // 6) AVD 생성 및 에뮬레이터 기동
   await createAvd(ANDROID_HOME, preset, sysImg, abi);
   await launchEmulator(ANDROID_HOME, preset.name);
 
   console.log("\n✅ Setup complete and emulator launched!");
 
+  // 7) Vite dev server 확인/기동
   await ensureViteDevServer();
 
+  // 8) APK 설치 및 실행
   const apkPath = join(process.cwd(), "app-debug.apk");
   if (!existsSync(apkPath)) {
     console.error(`❌ APK not found at ${apkPath}`);
     process.exit(1);
   }
-
   const { adb } = getSdkTools(ANDROID_HOME);
+  if (!adb) throw new Error("adb not found after installation.");
 
   console.log("📱 Installing APK...");
   await run(shQuote(adb), ["install", "-r", shQuote(apkPath)]);
 
-  // 앱 자동 실행 (✨ 모든 ADB 호출은 절대경로 사용)
   console.log("\n🚀 Launching WebView app...");
   await run(shQuote(adb), [
     "shell",
@@ -783,29 +830,27 @@ async function main() {
     "com.ebview.android/.MainActivity",
   ]);
 
+  // 9) Chrome DevTools 세팅
   console.log("\n🌐 Setting up Chrome remote debugging...");
   try {
-    // WebView 디버거 포트 포워딩
     await run(shQuote(adb), [
       "forward",
       "tcp:9222",
       "localabstract:chrome_devtools_remote",
     ]);
-
-    // Vite 개발 서버 reverse
     await run(shQuote(adb), ["reverse", "tcp:5173", "tcp:5173"]);
 
-    // Chrome DevTools 열기(실패해도 계속)
     console.log("🧭 Opening Chrome debugger...");
     if (isWindows) {
-      // 크롬 PATH가 없으면 실패할 수 있음 → 실패해도 무시
       try {
         spawn("cmd", ["/c", "start", "chrome", "chrome://inspect/#devices"], {
           detached: true,
           windowsHide: true,
           shell: true,
         });
-      } catch {}
+      } catch {
+        /* ignore */
+      }
       console.log(
         "ℹ️ Chrome이 자동으로 안 열리면 수동으로 chrome://inspect/#devices 를 열어주세요."
       );
@@ -815,7 +860,9 @@ async function main() {
           detached: true,
           shell: true,
         });
-      } catch {}
+      } catch {
+        /* ignore */
+      }
       console.log(
         "ℹ️ 자동으로 안 열리면 수동으로 chrome://inspect/#devices 를 여세요."
       );
