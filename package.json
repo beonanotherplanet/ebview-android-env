@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "android:webview": "node scripts/android-webview-dev.mjs",
+    "android:webview": "tsx scripts/android-webview-dev.ts",
     "android:build-debug": "cd android && ./gradlew assembleDebug",
     "android:build-release": "cd android && ./gradlew assembleRelease"
   },
@@ -13,5 +13,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   }
 }

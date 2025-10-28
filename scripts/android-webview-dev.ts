@@ -47,7 +47,12 @@ const SDK_URL = isWindows
 ──────────────────────────────────────────────── */
 const DEVICE_PRESETS: Record<
   string,
-  { name: string; api: string; res: { w: number; h: number; d: number }; ram: number }
+  {
+    name: string;
+    api: string;
+    res: { w: number; h: number; d: number };
+    ram: number;
+  }
 > = {
   "Galaxy Note10": {
     name: "Galaxy_Note10_API_30",
@@ -97,7 +102,12 @@ async function downloadFile(url: string, dest: string) {
     function request(urlToFetch: string) {
       https
         .get(urlToFetch, (r) => {
-          if (r.statusCode && r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+          if (
+            r.statusCode &&
+            r.statusCode >= 300 &&
+            r.statusCode < 400 &&
+            r.headers.location
+          ) {
             console.log(`↪ Redirecting to ${r.headers.location}`);
             r.resume();
             request(r.headers.location);
@@ -175,40 +185,73 @@ function getNodeMajor() {
 }
 
 /* ────────────────────────────────────────────────
-   Java Check (sdkmanager가 필요)
+   Java Check (자동 설치 포함)
 ──────────────────────────────────────────────── */
-function ensureJava17OrLater() {
+async function ensureJava17OrLater() {
+  let hasJava = false;
+  let versionText = "";
+
   try {
-    const out = execSync("java -version", { stdio: ["ignore", "pipe", "pipe"] })
+    versionText = execSync("java -version", {
+      stdio: ["ignore", "pipe", "pipe"],
+    })
       .toString()
       .trim();
-    // 보통 stderr로 버전이 나옴 → 위에선 pipe로 안전
+    hasJava = true;
   } catch {
-    throw new Error(
-      "Java가 필요합니다. JDK 17+를 설치하고 JAVA_HOME/PATH를 설정한 뒤 다시 실행하세요. (Adoptium Temurin 17 권장)"
-    );
+    hasJava = false;
   }
 
-  // 대략적 체크(정교한 파싱 대신 간단히)
-  const text = (() => {
-    try {
-      return execSync("java -version", { stdio: ["ignore", "pipe", "pipe"] })
-        .toString()
-        .trim();
-    } catch (e: any) {
-      return e?.stderr?.toString?.() ?? "";
+  if (hasJava) {
+    const m = versionText.match(/version "(.*?)"/);
+    if (m) {
+      const ver = m[1];
+      const major = parseInt(ver.split(".")[0], 10);
+      if (Number.isFinite(major) && major >= 17) {
+        console.log(`✔ Java ${ver} detected`);
+        return;
+      }
     }
-  })();
+    console.log(`⚠️ Java 감지됨 (${versionText}) 하지만 버전이 17 미만입니다.`);
+  } else {
+    console.log("❌ Java not found.");
+  }
 
-  const m = text.match(/version "(.*?)"/);
-  if (m) {
-    const ver = m[1]; // 예: "17.0.11"
-    const major = parseInt(ver.split(".")[0], 10);
-    if (Number.isFinite(major) && major < 17) {
-      throw new Error(
-        `Java ${ver} 감지됨. JDK 17+ 필요합니다. (현재: ${ver})`
-      );
-    }
+  // JDK 설치 루틴
+  console.log("⬇️ Installing Temurin JDK 17 (Adoptium) ...");
+
+  const installerUrl =
+    "https://github.com/adoptium/temurin17-binaries/releases/latest/download/OpenJDK17U-jdk_x64_windows_hotspot.msi";
+  const installerPath = join(TMP, "temurin17.msi");
+
+  await downloadFile(installerUrl, installerPath);
+
+  // PowerShell을 이용한 조용한 설치
+  console.log("⚙️ Running installer...");
+  try {
+    await run("powershell", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      `Start-Process msiexec.exe -ArgumentList '/i', '${installerPath}', '/quiet', '/norestart' -Wait`,
+    ]);
+  } catch (e) {
+    console.error("JDK 설치 중 오류 발생:", e);
+    throw new Error("JDK 17 설치 실패. 수동 설치를 시도하세요.");
+  }
+
+  console.log("✅ JDK 17 installed successfully.");
+
+  // 환경 변수 갱신 시도
+  const javaHomeGuess = "C:\\Program Files\\Eclipse Adoptium\\jdk-17";
+  if (existsSync(javaHomeGuess)) {
+    process.env.JAVA_HOME = javaHomeGuess;
+    process.env.PATH = `${join(javaHomeGuess, "bin")};${process.env.PATH}`;
+    console.log(`📦 JAVA_HOME set to: ${javaHomeGuess}`);
+  } else {
+    console.warn(
+      "⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다. 수동으로 환경 변수를 설정해주세요."
+    );
   }
 }
 
@@ -289,7 +332,9 @@ async function acceptLicenses(androidHome: string, sdkm: string) {
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
-        `cmd /c "echo y | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses"`,
+        `cmd /c "echo y | ${shQuote(sdkm)} --sdk_root=${shQuote(
+          androidHome
+        )} --licenses"`,
       ],
       { windowsHide: true }
     );
@@ -380,7 +425,9 @@ async function createAvd(
       ]);
       created = true;
     } catch {
-      console.log("ℹ️ Device profile 'pixel_5' not available. Retrying without --device...");
+      console.log(
+        "ℹ️ Device profile 'pixel_5' not available. Retrying without --device..."
+      );
       await run(shQuote(avdm), [
         "create",
         "avd",
