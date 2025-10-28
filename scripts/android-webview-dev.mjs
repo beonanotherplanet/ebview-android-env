@@ -145,49 +145,6 @@ function detectAndroidStudioSdk() {
 }
 
 /* ────────────────────────────────────────────────
-   Gradle Installer (💡 추가)
-──────────────────────────────────────────────── */
-async function ensureGradle(androidDir) {
-  console.log("\n🔍 Checking Gradle...");
-
-  // gradlew already exists
-  if (existsSync(join(androidDir, "gradlew"))) {
-    console.log("✔ Gradle Wrapper already exists.");
-    return;
-  }
-
-  try {
-    const version = execSync("gradle -v", { encoding: "utf8" });
-    console.log(`✔ Found system Gradle:\n${version}`);
-  } catch {
-    console.log("⚙️ Gradle not found. Installing Gradle 8.7...");
-    const zipUrl =
-      "https://services.gradle.org/distributions/gradle-8.7-bin.zip";
-    const zipFile = join(TMP, "gradle.zip");
-    const extractPath = join(TMP, "gradle");
-
-    await downloadFile(zipUrl, zipFile);
-
-    if (isWindows)
-      await run("powershell", [
-        "Expand-Archive",
-        `-Path \"${zipFile}\"`,
-        `-DestinationPath \"${extractPath}\"`,
-        "-Force",
-      ]);
-    else await run("unzip", ["-o", zipFile, "-d", extractPath]);
-
-    const gradleBin = join(extractPath, readdirSync(extractPath)[0], "bin");
-    process.env.PATH = `${gradleBin}:${process.env.PATH}`;
-    console.log(`✔ Added Gradle to PATH: ${gradleBin}`);
-  }
-
-  console.log("🧱 Generating Gradle Wrapper...");
-  await run("gradle", ["wrapper"], { cwd: androidDir });
-  console.log("✅ Gradle Wrapper created!");
-}
-
-/* ────────────────────────────────────────────────
    SDK Setup
 ──────────────────────────────────────────────── */
 async function ensureSdk(androidHome) {
@@ -373,17 +330,18 @@ async function main() {
     await new Promise((res) => setTimeout(res, 5000));
   }
 
-  // 💡 여기서 Gradle 자동 설치 추가
-  const androidDir = join(process.cwd(), "android");
-  await ensureGradle(androidDir);
+  const apkPath = join(process.cwd(), "app-debug.apk");
+  if (!existsSync(apkPath)) {
+    console.error(`❌ APK not found at ${apkPath}`);
+    process.exit(1);
+  }
 
-  // 2️⃣ Android 앱 빌드 및 설치
-  console.log("\n🔧 Building Android app...");
-  const gradlew = isWindows ? "gradlew.bat" : "./gradlew";
-  await run(gradlew, ["assembleDebug"], { cwd: androidDir });
+  const adb = isWindows
+    ? join(ANDROID_HOME, "platform-tools", "adb.exe")
+    : join(ANDROID_HOME, "platform-tools", "adb");
 
-  console.log("📱 Installing app on emulator...");
-  await run(gradlew, ["installDebug"], { cwd: androidDir });
+  console.log("📱 Installing APK...");
+  await run(adb, ["install", "-r", apkPath]);
 
   // 3️⃣ 앱 자동 실행
   console.log("\n🚀 Launching WebView app...");

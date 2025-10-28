@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "android:webview": "node scripts/android-webview-dev.mjs"
+    "android:webview": "node scripts/android-webview-dev.mjs",
+    "android:build-debug": "cd android && ./gradlew assembleDebug",
+    "android:build-release": "cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
     "inquirer": "^9.3.6"
