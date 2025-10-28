@@ -185,7 +185,7 @@ function getNodeMajor() {
 }
 
 /* ────────────────────────────────────────────────
-   Java Check (자동 설치 포함)
+   Java Check (자동 설치 포함, Windows 전용)
 ──────────────────────────────────────────────── */
 async function ensureJava17OrLater() {
   let hasJava = false;
@@ -217,16 +217,18 @@ async function ensureJava17OrLater() {
     console.log("❌ Java not found.");
   }
 
-  // JDK 설치 루틴
+  // ────────────────────────────────────────────────
+  // JDK 17 Temurin 자동 설치 (Adoptium 공식 배포판)
+  // ────────────────────────────────────────────────
   console.log("⬇️ Installing Temurin JDK 17 (Adoptium) ...");
 
   const installerUrl =
-    "https://github.com/adoptium/temurin17-binaries/releases/latest/download/OpenJDK17U-jdk_x64_windows_hotspot.msi";
+    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jdk_x64_windows_hotspot_17.0.13_11.msi";
   const installerPath = join(TMP, "temurin17.msi");
 
   await downloadFile(installerUrl, installerPath);
 
-  // PowerShell을 이용한 조용한 설치
+  // PowerShell을 통한 무인 설치 (조용히)
   console.log("⚙️ Running installer...");
   try {
     await run("powershell", [
@@ -242,12 +244,26 @@ async function ensureJava17OrLater() {
 
   console.log("✅ JDK 17 installed successfully.");
 
-  // 환경 변수 갱신 시도
-  const javaHomeGuess = "C:\\Program Files\\Eclipse Adoptium\\jdk-17";
-  if (existsSync(javaHomeGuess)) {
-    process.env.JAVA_HOME = javaHomeGuess;
-    process.env.PATH = `${join(javaHomeGuess, "bin")};${process.env.PATH}`;
-    console.log(`📦 JAVA_HOME set to: ${javaHomeGuess}`);
+  // ────────────────────────────────────────────────
+  // JAVA_HOME 및 PATH 설정 (임시 반영)
+  // ────────────────────────────────────────────────
+  const possibleHomes = [
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.13.11-hotspot",
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-17",
+  ];
+
+  let javaHome = null;
+  for (const path of possibleHomes) {
+    if (existsSync(path)) {
+      javaHome = path;
+      break;
+    }
+  }
+
+  if (javaHome) {
+    process.env.JAVA_HOME = javaHome;
+    process.env.PATH = `${join(javaHome, "bin")};${process.env.PATH}`;
+    console.log(`📦 JAVA_HOME set to: ${javaHome}`);
   } else {
     console.warn(
       "⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다. 수동으로 환경 변수를 설정해주세요."
