@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
  * Android AVD Auto Setup (Windows 우선 + mac 호환)
- * - JAVA_HOME 없을 때 포터블 JDK(zip) 설치/주입
- * - SDK cmdline-tools 구조 자동 교정
- * - Windows 방화벽에 adb.exe 허용 규칙 자동 추가
- * - 에뮬레이터 부팅 완료까지 대기 (wait-for-device + sys.boot_completed)
- * - 이후 모든 adb 호출은 고정된 serial(-s) 사용
+ * - JAVA_HOME 없으면 포터블 JDK(zip) 자동 설치 후 런타임 주입
+ * - SDK cmdline-tools 구조 자동 교정 + sdkmanager/avdmanager/emulator/adb 해상
+ * - Windows 방화벽에 adb.exe 허용 규칙 자동 추가(최초 1회)
+ * - 에뮬레이터 포트 할당/가속 ON→OFF 자동 재시도, 부팅 완료(sys.boot_completed=1)까지 대기
+ * - 이후 ADB 모든 호출은 고정 시리얼(-s) 사용
  */
 
 import inquirer from "inquirer";
@@ -43,59 +43,39 @@ const SDK_URL = isWindows
   : `https://dl.google.com/android/repository/commandlinetools-mac-${SDK_VERSION}_latest.zip`;
 
 /* ────────────────────────────────────────────────
-   Device Profiles
+   Device Presets
 ──────────────────────────────────────────────── */
 const DEVICE_PRESETS: Record<
   string,
-  {
-    name: string;
-    api: string;
-    res: { w: number; h: number; d: number };
-    ram: number;
-  }
+  { name: string; api: string; res: { w: number; h: number; d: number } }
 > = {
   "Galaxy Note10": {
     name: "Galaxy_Note10_API_30",
     api: "android-30",
     res: { w: 1080, h: 2280, d: 401 },
-    ram: 8192,
   },
   "Galaxy Note20": {
     name: "Galaxy_Note20_API_30",
     api: "android-30",
     res: { w: 1080, h: 2400, d: 393 },
-    ram: 8192,
   },
   "Galaxy S22": {
     name: "Galaxy_S22_API_30",
     api: "android-30",
     res: { w: 1080, h: 2340, d: 420 },
-    ram: 8192,
   },
 };
 
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function shQuote(p: string): string {
-  return p.includes(" ") ? `"${p}"` : p;
-}
-
-function ensureDir(p: string): void {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const shQuote = (p: string) => (p.includes(" ") ? `"${p}"` : p);
+const ensureDir = (p: string) => {
   if (!existsSync(p)) mkdirSync(p, { recursive: true });
-}
-
-function normalizeIniPath(p: string): string {
-  return p.replace(/\\/g, "/");
-}
-
-function getNodeMajor(): number {
-  return parseInt(process.versions.node.split(".")[0], 10);
-}
+};
+const normalizeIniPath = (p: string) => p.replace(/\\/g, "/");
+const getNodeMajor = () => parseInt(process.versions.node.split(".")[0], 10);
 
 function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
   return new Promise<void>((res, rej) => {
@@ -106,7 +86,7 @@ function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
   });
 }
 
-async function runAndGetStdout(
+function runAndGetStdout(
   cmd: string,
   args: string[] = [],
   opts: any = {}
@@ -133,9 +113,9 @@ async function downloadFile(url: string, dest: string): Promise<void> {
   console.log(`[download] ${url}`);
   await new Promise<void>((res, rej) => {
     const file = createWriteStream(dest);
-    function request(urlToFetch: string) {
+    function request(u: string) {
       https
-        .get(urlToFetch, (r) => {
+        .get(u, (r) => {
           if (
             r.statusCode &&
             r.statusCode >= 300 &&
@@ -148,7 +128,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
             return;
           }
           if (r.statusCode !== 200) {
-            rej(new Error(`HTTP ${r.statusCode} for ${urlToFetch}`));
+            rej(new Error(`HTTP ${r.statusCode} for ${u}`));
             return;
           }
           const total = parseInt(r.headers["content-length"] || "0", 10);
@@ -188,9 +168,7 @@ async function killStaleEmulators(): Promise<void> {
       run("taskkill", ["/F", "/IM", "qemu-system-x86_64.exe"], { shell: true })
     );
     await silence(() =>
-      run("taskkill", ["/F", "/IM", "qemu-system-aarch64.exe"], {
-        shell: true,
-      })
+      run("taskkill", ["/F", "/IM", "qemu-system-aarch64.exe"], { shell: true })
     );
     await silence(() =>
       run("taskkill", ["/F", "/IM", "emulator.exe"], { shell: true })
@@ -207,15 +185,13 @@ async function killStaleEmulators(): Promise<void> {
 }
 
 /* PowerShell helpers */
-function psq(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`;
-}
+const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
 async function runPSScript(
-  scriptContent: string,
+  script: string,
   opts: { env?: NodeJS.ProcessEnv } = {}
-): Promise<void> {
+) {
   const psPath = join(TMP, `__tmp_${Date.now()}.ps1`);
-  writeFileSync(psPath, scriptContent, "utf8");
+  writeFileSync(psPath, script, "utf8");
   try {
     await run(
       "powershell",
@@ -247,7 +223,9 @@ function runtimeEnv(params: {
   return base;
 }
 
-/* SDK tool resolver */
+/* ────────────────────────────────────────────────
+   SDK Tool Resolver
+──────────────────────────────────────────────── */
 function findFileRecursive(
   root: string,
   target: string,
@@ -273,6 +251,7 @@ function findFileRecursive(
   }
   return walk(root, 0);
 }
+
 function resolveSdkTool(
   androidHome: string,
   name: "sdkmanager" | "avdmanager" | "emulator" | "adb"
@@ -280,6 +259,7 @@ function resolveSdkTool(
   const isBat = isWindows && (name === "sdkmanager" || name === "avdmanager");
   const isExe = isWindows && (name === "emulator" || name === "adb");
   const file = isBat ? `${name}.bat` : isExe ? `${name}.exe` : name;
+
   const candidates = [
     join(androidHome, "cmdline-tools", "latest", "bin", file),
     join(androidHome, "cmdline-tools", "bin", file),
@@ -287,8 +267,10 @@ function resolveSdkTool(
     join(androidHome, "platform-tools", file),
   ];
   for (const c of candidates) if (existsSync(c)) return c;
+
   return findFileRecursive(androidHome, file, 5);
 }
+
 function getSdkTools(androidHome: string) {
   const sdkm = resolveSdkTool(androidHome, "sdkmanager");
   const avdm = resolveSdkTool(androidHome, "avdmanager");
@@ -298,7 +280,32 @@ function getSdkTools(androidHome: string) {
 }
 
 /* ────────────────────────────────────────────────
-   JDK 17 (포터블 ZIP 설치)
+   Detect Studio-bundled SDK (optional)
+──────────────────────────────────────────────── */
+function detectAndroidStudioSdk(): string | null {
+  const studioPaths = isWindows
+    ? [
+        "C:\\Program Files\\Android\\Android Studio",
+        "C:\\Program Files\\Android\\Android Studio\\jbr",
+      ]
+    : ["/Applications/Android Studio.app/Contents"];
+  for (const base of studioPaths) {
+    try {
+      const subs = readdirSync(base, { withFileTypes: true });
+      for (const d of subs) {
+        if (d.name.toLowerCase().includes("sdk")) {
+          const sdkPath = join(base, d.name);
+          console.log(`✅ Found Android Studio SDK at: ${sdkPath}`);
+          return sdkPath;
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+/* ────────────────────────────────────────────────
+   JDK 17 (portable ZIP install for Windows)
 ──────────────────────────────────────────────── */
 const JDK_ZIP_URL =
   "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jdk_x64_windows_hotspot_17.0.13_11.zip";
@@ -319,15 +326,18 @@ function tryDeriveJavaHomeFromWhere(): string | null {
     return null;
   }
 }
+
 function findWindowsJavaHome(): string | null {
   if (
     process.env.JAVA_HOME &&
     existsSync(join(process.env.JAVA_HOME, "bin", "java.exe"))
   )
     return process.env.JAVA_HOME;
+
   const fromWhere = tryDeriveJavaHomeFromWhere();
   if (fromWhere && existsSync(join(fromWhere, "bin", "java.exe")))
     return fromWhere;
+
   const roots = [
     "C:\\Program Files\\Eclipse Adoptium",
     "C:\\Program Files\\Java",
@@ -338,10 +348,9 @@ function findWindowsJavaHome(): string | null {
       const items = readdirSync(root, { withFileTypes: true });
       for (const it of items) {
         if (!it.isDirectory()) continue;
-        const name = it.name.toLowerCase();
-        if (name.startsWith("jdk-17")) {
-          const path = join(root, it.name);
-          if (existsSync(join(path, "bin", "java.exe"))) return path;
+        if (it.name.toLowerCase().startsWith("jdk-17")) {
+          const p = join(root, it.name);
+          if (existsSync(join(p, "bin", "java.exe"))) return p;
         }
       }
     } catch {}
@@ -349,6 +358,7 @@ function findWindowsJavaHome(): string | null {
   if (existsSync(join(LOCAL_JDK_DIR, "bin", "java.exe"))) return LOCAL_JDK_DIR;
   return null;
 }
+
 async function ensureJava17OrLater(): Promise<string> {
   try {
     const ver = execSync("java -version", {
@@ -393,19 +403,18 @@ async function ensureJava17OrLater(): Promise<string> {
   ].join("\r\n");
   await runPSScript(ps);
 
+  // 폴더 구조 평탄화
   let javaHome = "";
   try {
     const entries = readdirSync(LOCAL_JDK_DIR, { withFileTypes: true });
     const jdkFolder = entries.find(
       (e) => e.isDirectory() && /^jdk-17/i.test(e.name)
     );
-    if (jdkFolder) javaHome = join(LOCAL_JDK_DIR, jdkFolder.name);
-  } catch {}
-  if (!javaHome) {
-    if (existsSync(join(LOCAL_JDK_DIR, "bin", "java.exe")))
-      javaHome = LOCAL_JDK_DIR;
+    javaHome = jdkFolder ? join(LOCAL_JDK_DIR, jdkFolder.name) : LOCAL_JDK_DIR;
+  } catch {
+    javaHome = LOCAL_JDK_DIR;
   }
-  if (!javaHome || !existsSync(join(javaHome, "bin", "java.exe")))
+  if (!existsSync(join(javaHome, "bin", "java.exe")))
     throw new Error("Portable JDK 설치 실패 (java.exe 미발견)");
 
   process.env.JAVA_HOME = javaHome;
@@ -473,7 +482,7 @@ async function ensureSdk(androidHome: string): Promise<void> {
 }
 
 /* ────────────────────────────────────────────────
-   Licenses / Installs
+   License & Packages
 ──────────────────────────────────────────────── */
 async function acceptLicenses(
   androidHome: string,
@@ -511,6 +520,7 @@ async function ensureEmulatorInstalled(
 ): Promise<void> {
   const { sdkm } = getSdkTools(androidHome);
   if (!sdkm) throw new Error("sdkmanager not found. cmdline-tools 설치 확인.");
+
   if (isWindows) {
     const ps = [
       "$ErrorActionPreference = 'Stop'",
@@ -545,14 +555,16 @@ async function installPlatformTools(
   const sysImg = "google_apis";
   const systemImagePath = `system-images;${api};${sysImg};${abi}`;
 
-  console.log(`📦 Installing packages:
+  console.log(
+    `📦 Installing packages:
  - platform-tools
  - emulator
  - platforms;${api}
  - ${systemImagePath}
  - extras;intel;Hardware_Accelerated_Execution_Manager (best-effort)
  - extras;google;gdk (best-effort)
-`);
+`
+  );
 
   if (isWindows) {
     const psInstall = (pkgs: string[]) =>
@@ -578,7 +590,9 @@ async function installPlatformTools(
         `platforms;${api}`,
         systemImagePath,
       ]),
-      { env: runtimeEnv({ androidHome, javaHome }) }
+      {
+        env: runtimeEnv({ androidHome, javaHome }),
+      }
     );
     try {
       await runPSScript(psInstall(["extras;google;gdk"]), {
@@ -588,7 +602,9 @@ async function installPlatformTools(
     try {
       await runPSScript(
         psInstall(["extras;intel;Hardware_Accelerated_Execution_Manager"]),
-        { env: runtimeEnv({ androidHome, javaHome }) }
+        {
+          env: runtimeEnv({ androidHome, javaHome }),
+        }
       );
     } catch {}
   } else {
@@ -617,7 +633,7 @@ async function installPlatformTools(
 }
 
 /* ────────────────────────────────────────────────
-   Windows 방화벽: adb.exe 허용 규칙 추가
+   Windows Firewall for ADB (once)
 ──────────────────────────────────────────────── */
 async function ensureWindowsFirewallForAdb(adbPath: string) {
   if (!isWindows) return;
@@ -646,7 +662,7 @@ async function ensureWindowsFirewallForAdb(adbPath: string) {
 }
 
 /* ────────────────────────────────────────────────
-   AVD Creation (안전 기본값)
+   AVD Creation (safe defaults)
 ──────────────────────────────────────────────── */
 async function createAvd(
   androidHome: string,
@@ -658,10 +674,6 @@ async function createAvd(
   const avdDir = join(HOME, ".android", "avd", `${name}.avd`);
   const { avdm } = getSdkTools(androidHome);
   if (!avdm) throw new Error("avdmanager not found after installation.");
-
-  // sysImg에 playstore가 포함되면 true, 아니면 false
-  const hasPlayStore = /playstore/i.test(sysImg);
-  const playStoreFlag = hasPlayStore ? "true" : "false";
 
   if (existsSync(avdDir)) {
     console.log("✔ AVD already exists.");
@@ -682,7 +694,6 @@ async function createAvd(
         { env: runtimeEnv({ androidHome }) }
       );
     } catch {
-      // 일부 환경은 device 프로필 필요 → pixel_5로 재시도
       await run(
         shQuote(avdm),
         [
@@ -701,11 +712,11 @@ async function createAvd(
     }
   }
 
-  // 안전 기본값으로 config.ini 갱신
+  // config.ini 안정화 (스냅샷/그래픽/램/해상도)
   ensureDir(avdDir);
   const ini = [
     `AvdId=${name}`,
-    `PlayStore.enabled=${playStoreFlag}`,
+    `PlayStore.enabled=false`, // google_apis 태그엔 기본 false
     `abi.type=${abi}`,
     `avd.ini.displayname=${name}`,
     `hw.cpu.arch=${abi.includes("arm") ? "arm64" : "x86_64"}`,
@@ -727,11 +738,11 @@ async function createAvd(
     `fastboot.chosenSnapshotFile=`,
   ].join("\n");
   writeFileSync(join(avdDir, "config.ini"), ini, "utf8");
-  console.log(`✔ Created/updated AVD config for ${name} (safe defaults)`);
+  console.log(`✔ Created/updated AVD config for ${name}`);
 }
 
 /* ────────────────────────────────────────────────
-   Emulator Launcher + 포트/가속 자동 재시도
+   Emulator Launcher (port + accel fallback)
 ──────────────────────────────────────────────── */
 async function launchEmulator(
   androidHome: string,
@@ -769,7 +780,6 @@ async function launchEmulator(
     : ["-accel", "on", "-gpu", "host"];
   const accelOff = ["-accel", "off", "-gpu", "swiftshader_indirect"];
 
-  // 조기 크래시 감지: 10초 내 종료되면 crashed 판정
   const spawnAndProbe = (args: string[]) =>
     new Promise<"alive" | "crashed">((resolve) => {
       const p = spawn(shQuote(emulatorCmd!), args, {
@@ -800,7 +810,6 @@ async function launchEmulator(
     });
 
   for (const port of candidatePorts) {
-    // 1차: 가속 ON
     console.log(`▶ trying port=${port} accel=on ...`);
     const r1 = await spawnAndProbe([...baseArgs(port), ...accelOn]);
     if (r1 === "alive" && (await waitEmulatorPortDetected(port, 20_000)))
@@ -808,7 +817,6 @@ async function launchEmulator(
 
     await killStaleEmulators();
 
-    // 2차: 가속 OFF
     console.log(`▶ retry port=${port} accel=off ...`);
     const r2 = await spawnAndProbe([...baseArgs(port), ...accelOff]);
     if (r2 === "alive" && (await waitEmulatorPortDetected(port, 25_000)))
@@ -820,7 +828,6 @@ async function launchEmulator(
   throw new Error("failed to launch emulator on any candidate port");
 }
 
-// 에뮬레이터 포트 감지: adb devices에 emulator-PORT 등장 여부
 async function waitEmulatorPortDetected(
   port: number,
   timeoutMs: number
@@ -845,9 +852,8 @@ async function waitEmulatorPortDetected(
 ──────────────────────────────────────────────── */
 async function ensureViteDevServer() {
   console.log("\n🧠 Checking Vite dev server (http://localhost:5173) ...");
-  const nodeMajor = getNodeMajor();
   const canFetch = typeof fetch === "function";
-  if (!canFetch && nodeMajor < 18)
+  if (!canFetch && getNodeMajor() < 18)
     console.log("ℹ️ Node 18+ 권장. 현재 환경에선 바로 실행 시도.");
   let ok = false;
   if (canFetch) {
@@ -874,32 +880,6 @@ async function ensureViteDevServer() {
 /* ────────────────────────────────────────────────
    ADB 준비/시리얼 획득
 ──────────────────────────────────────────────── */
-async function ensureWindowsFirewallForAdb(adbPath: string) {
-  if (!isWindows) return;
-  const ruleNameIn = "ADB Inbound Allow";
-  const ruleNameOut = "ADB Outbound Allow";
-  const ps = [
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    `if (-not (Get-NetFirewallApplicationFilter -PolicyStore ActiveStore | Where-Object { $_.Program -ieq ${psq(
-      adbPath
-    )} })) {`,
-    `  New-NetFirewallRule -DisplayName ${psq(
-      ruleNameIn
-    )} -Direction Inbound -Action Allow -Program ${psq(
-      adbPath
-    )} -Profile Any | Out-Null`,
-    `  New-NetFirewallRule -DisplayName ${psq(
-      ruleNameOut
-    )} -Direction Outbound -Action Allow -Program ${psq(
-      adbPath
-    )} -Profile Any | Out-Null`,
-    `}`,
-  ].join("\r\n");
-  try {
-    await runPSScript(ps);
-  } catch {}
-}
-
 async function prepareAdbAndGetSerial(
   adbPath: string,
   androidHome: string,
@@ -917,7 +897,7 @@ async function prepareAdbAndGetSerial(
     env: runtimeEnv({ androidHome, javaHome }),
   });
 
-  const deadline = Date.now() + 240_000; // 최대 4분 (콜드부트 고려)
+  const deadline = Date.now() + 240_000; // 최대 4분
   let lastLog = 0;
   while (Date.now() < deadline) {
     const out = await runAndGetStdout(shQuote(adbPath), ["devices"], {
@@ -929,15 +909,15 @@ async function prepareAdbAndGetSerial(
       .map((l) => l.split(/\s+/));
 
     let pick = devs.find(
-      (cols) =>
-        cols[0]?.startsWith(`emulator-${portHint ?? -1}`) &&
-        (cols[1] === "device" || cols[1] === "offline")
+      (c) =>
+        c[0]?.startsWith(`emulator-${portHint ?? -1}`) &&
+        (c[1] === "device" || c[1] === "offline")
     );
     if (!pick)
       pick = devs.find(
-        (cols) =>
-          cols[0]?.startsWith("emulator-") &&
-          (cols[1] === "device" || cols[1] === "offline")
+        (c) =>
+          c[0]?.startsWith("emulator-") &&
+          (c[1] === "device" || c[1] === "offline")
       );
 
     if (pick?.[0]) {
@@ -951,7 +931,7 @@ async function prepareAdbAndGetSerial(
             { env: runtimeEnv({ androidHome, javaHome }) }
           );
           if (val.trim() === "1") {
-            await sleep(1500); // 런처 안정화
+            await sleep(1500);
             return serial;
           }
         } catch {}
@@ -1010,7 +990,7 @@ async function main() {
     JAVA_HOME_RUNTIME || process.env.JAVA_HOME || ""
   );
 
-  // 5) 시스템 이미지 설치
+  // 5) 시스템 이미지/패키지 설치
   const { device } = await inquirer.prompt([
     {
       type: "list",
