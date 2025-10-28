@@ -77,6 +77,57 @@ const DEVICE_PRESETS: Record<
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
+// === SDK tool resolver ===
+function findFileRecursive(
+  root: string,
+  target: string,
+  maxDepth = 5
+): string | null {
+  function walk(dir: string, depth: number): string | null {
+    if (depth > maxDepth) return null;
+    let entries: any[] = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isFile() && e.name.toLowerCase() === target.toLowerCase()) return p;
+      if (e.isDirectory()) {
+        const r = walk(p, depth + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+  return walk(root, 0);
+}
+
+function resolveSdkTool(
+  androidHome: string,
+  name: "sdkmanager" | "avdmanager" | "emulator" | "adb"
+) {
+  const isBat = isWindows && (name === "sdkmanager" || name === "avdmanager");
+  const isExe = isWindows && (name === "emulator" || name === "adb");
+
+  const file = isBat ? `${name}.bat` : isExe ? `${name}.exe` : name;
+
+  const candidates = [
+    join(androidHome, "cmdline-tools", "latest", "bin", file),
+    join(androidHome, "cmdline-tools", "bin", file),
+    join(androidHome, "emulator", file),
+    join(androidHome, "platform-tools", file),
+  ];
+
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  // 마지막 수단: 전체 SDK 경로에서 재귀 탐색
+  const hit = findFileRecursive(androidHome, file, 5);
+  return hit ?? null;
+}
+
 function shQuote(p: string) {
   // 안전한 경로 인자용 인용 (윈도우/맥 모두)
   if (p.includes(" ")) return `"${p}"`;
@@ -304,7 +355,13 @@ async function ensureJava17OrLater() {
 async function ensureSdk(androidHome: string) {
   const toolsBase = join(androidHome, "cmdline-tools");
   const latestDir = join(toolsBase, "latest");
-  if (existsSync(latestDir)) {
+
+  // 이미 정상 설치됨
+  if (
+    existsSync(
+      join(latestDir, "bin", isWindows ? "sdkmanager.bat" : "sdkmanager")
+    )
+  ) {
     console.log("✔ Command-line tools already exist.");
     return;
   }
@@ -314,7 +371,6 @@ async function ensureSdk(androidHome: string) {
   await downloadFile(SDK_URL, zip);
 
   if (isWindows) {
-    // Expand-Archive 뒤에 내부 폴더명이 'cmdline-tools'로 생성되므로 이동 필요
     await run(
       "powershell",
       [
@@ -328,22 +384,45 @@ async function ensureSdk(androidHome: string) {
       ],
       { windowsHide: true }
     );
-    const extracted = join(toolsBase, "cmdline-tools");
+
+    // 가능한 폴더 구조 정리:
+    // 1) cmdline-tools\cmdline-tools\bin\...
+    // 2) cmdline-tools\bin\...
+    // 3) 기타 변종
+    const inner = join(toolsBase, "cmdline-tools");
     ensureDir(latestDir);
-    // Windows에선 renameSync로 이동
     try {
-      renameSync(extracted, latestDir);
+      if (existsSync(join(inner, "bin"))) {
+        // 구조 2) → inner를 latest로 승격
+        renameSync(inner, latestDir);
+      } else if (existsSync(join(inner, "cmdline-tools", "bin"))) {
+        // 구조 1) → inner\cmdline-tools 를 latest로 승격
+        renameSync(join(inner, "cmdline-tools"), latestDir);
+      }
     } catch {
-      // 일부 케이스에서 이미 latest가 있으면 넘어감
+      /* ignore */
     }
   } else {
     await run("unzip", ["-o", zip, "-d", toolsBase]);
-    // macOS: cmdline-tools/cmdline-tools → cmdline-tools/latest
     try {
-      renameSync(join(toolsBase, "cmdline-tools"), latestDir);
-    } catch {}
+      const inner = join(toolsBase, "cmdline-tools");
+      if (existsSync(join(inner, "bin"))) {
+        renameSync(inner, latestDir);
+      } else if (existsSync(join(inner, "cmdline-tools", "bin"))) {
+        renameSync(join(inner, "cmdline-tools"), latestDir);
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
+  // 끝으로 존재 확인
+  const sdkPath = resolveSdkTool(androidHome, "sdkmanager");
+  if (!sdkPath) {
+    throw new Error(
+      `cmdline-tools 설치 후에도 sdkmanager를 찾지 못했습니다. (path: ${toolsBase})`
+    );
+  }
   console.log("✔ Installed command-line tools.");
 }
 
@@ -351,18 +430,16 @@ async function ensureSdk(androidHome: string) {
    sdkmanager helpers (licenses & installs)
 ──────────────────────────────────────────────── */
 function getSdkTools(androidHome: string) {
-  const sdkm = isWindows
-    ? join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager.bat")
-    : join(androidHome, "cmdline-tools", "latest", "bin", "sdkmanager");
-  const avdm = isWindows
-    ? join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager.bat")
-    : join(androidHome, "cmdline-tools", "latest", "bin", "avdmanager");
-  const emulatorCmd = isWindows
-    ? join(androidHome, "emulator", "emulator.exe")
-    : join(androidHome, "emulator", "emulator");
-  const adb = isWindows
-    ? join(androidHome, "platform-tools", "adb.exe")
-    : join(androidHome, "platform-tools", "adb");
+  const sdkm = resolveSdkTool(androidHome, "sdkmanager");
+  const avdm = resolveSdkTool(androidHome, "avdmanager");
+  const emulatorCmd = resolveSdkTool(androidHome, "emulator");
+  const adb = resolveSdkTool(androidHome, "adb");
+
+  if (!sdkm) throw new Error("sdkmanager not found after installation.");
+  if (!avdm) throw new Error("avdmanager not found after installation.");
+  if (!emulatorCmd) throw new Error("emulator not found after installation.");
+  if (!adb) throw new Error("adb not found after installation.");
+
   return { sdkm, avdm, emulatorCmd, adb };
 }
 
