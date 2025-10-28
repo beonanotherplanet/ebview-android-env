@@ -32,7 +32,7 @@ const HOME = homedir();
 const TMP = tmpdir();
 
 const DEFAULT_SDK_PATH = isWindows
-  ? join(HOME, "AppData", "Local", "Android", "sdk")
+  ? join(HOME, "AppData", "Local", "Android", "Sdk")
   : join(HOME, "Library", "Android", "sdk");
 
 const SDK_VERSION = "12266719";
@@ -258,7 +258,7 @@ function getSdkTools(androidHome: string) {
 }
 
 /* ────────────────────────────────────────────────
-   JDK 17 확보 (가장 확실한 포터블 ZIP 설치 경로)
+   JDK 17 확보 (포터블 ZIP 설치 경로)
 ──────────────────────────────────────────────── */
 const JDK_ZIP_URL =
   "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jdk_x64_windows_hotspot_17.0.13_11.zip";
@@ -270,28 +270,23 @@ function tryDeriveJavaHomeFromWhere(): string | null {
       .trim();
     const lines = out.split(/\r?\n/).filter(Boolean);
     if (!lines.length) return null;
-    // e.g. C:\Program Files\Eclipse Adoptium\jdk-17.x\bin\java.exe
     const javaExe = lines[0];
-    if (javaExe.toLowerCase().endsWith("\\java.exe")) {
+    if (javaExe.toLowerCase().endsWith("\\java.exe"))
       return javaExe.replace(/\\bin\\java\.exe$/i, "");
-    }
     return null;
   } catch {
     return null;
   }
 }
 function findWindowsJavaHome(): string | null {
-  // 1) 환경변수
   if (
     process.env.JAVA_HOME &&
     existsSync(join(process.env.JAVA_HOME, "bin", "java.exe"))
   )
     return process.env.JAVA_HOME;
-  // 2) where java
   const fromWhere = tryDeriveJavaHomeFromWhere();
   if (fromWhere && existsSync(join(fromWhere, "bin", "java.exe")))
     return fromWhere;
-  // 3) 일반적인 설치 위치들
   const roots = [
     "C:\\Program Files\\Eclipse Adoptium",
     "C:\\Program Files\\Java",
@@ -310,12 +305,10 @@ function findWindowsJavaHome(): string | null {
       }
     } catch {}
   }
-  // 4) 우리 포터블 설치 위치
   if (existsSync(join(LOCAL_JDK_DIR, "bin", "java.exe"))) return LOCAL_JDK_DIR;
   return null;
 }
 async function ensureJava17OrLater(): Promise<string> {
-  // 이미 사용 가능한 java가 있으면 그대로 사용
   try {
     const ver = execSync("java -version", {
       stdio: ["ignore", "pipe", "pipe"],
@@ -342,33 +335,26 @@ async function ensureJava17OrLater(): Promise<string> {
   if (!isWindows)
     throw new Error("Java JDK 17+ is required. Please install JDK 17+.");
 
-  // 포터블 JDK(zip) 설치
   console.log("⬇️ Installing portable Temurin JDK 17 (zip) ...");
   ensureDir(LOCAL_JDK_DIR);
   const zipPath = join(TMP, "temurin17.zip");
   await downloadFile(JDK_ZIP_URL, zipPath);
 
-  // 압축 해제 (폴더 안에 jdk-17... 루트가 들어있어서 contents를 목표 폴더로 이동)
-  await run(
-    "powershell",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      `Remove-Item -Recurse -Force ${psq(
-        LOCAL_JDK_DIR
-      )} -ErrorAction SilentlyContinue;`,
-      `New-Item -ItemType Directory -Force -Path ${psq(
-        LOCAL_JDK_DIR
-      )} | Out-Null;`,
-      `Expand-Archive -Path ${psq(zipPath)} -DestinationPath ${psq(
-        LOCAL_JDK_DIR
-      )} -Force;`,
-    ].join(" "),
-    { shell: true }
-  );
+  // ⬇⬇⬇ 여기 수정: 문자열 join 사용하지 않고 runPSScript 로 실행 ⬇⬇⬇
+  const ps = [
+    "$ErrorActionPreference = 'Stop'",
+    `if (Test-Path ${psq(
+      LOCAL_JDK_DIR
+    )}) { try { Remove-Item -Recurse -Force ${psq(LOCAL_JDK_DIR)} } catch {} }`,
+    `New-Item -ItemType Directory -Force -Path ${psq(
+      LOCAL_JDK_DIR
+    )} | Out-Null`,
+    `Expand-Archive -Path ${psq(zipPath)} -DestinationPath ${psq(
+      LOCAL_JDK_DIR
+    )} -Force`,
+  ].join("\r\n");
+  await runPSScript(ps);
 
-  // temurin-17\jdk-17.x.x+xx\* 구조 → 가장 상위 jdk-17.* 폴더를 JAVA_HOME 으로
   let javaHome = "";
   try {
     const entries = readdirSync(LOCAL_JDK_DIR, { withFileTypes: true });
@@ -378,7 +364,6 @@ async function ensureJava17OrLater(): Promise<string> {
     if (jdkFolder) javaHome = join(LOCAL_JDK_DIR, jdkFolder.name);
   } catch {}
   if (!javaHome) {
-    // 바로 bin이 있을 수도
     if (existsSync(join(LOCAL_JDK_DIR, "bin", "java.exe")))
       javaHome = LOCAL_JDK_DIR;
   }
@@ -419,18 +404,18 @@ async function ensureSdk(androidHome: string): Promise<void> {
       "-ExecutionPolicy",
       "Bypass",
       "Expand-Archive",
-      `-Path ${shQuote(zip)}`,
-      `-DestinationPath ${shQuote(toolsBase)}`,
+      `-Path`,
+      shQuote(zip),
+      `-DestinationPath`,
+      shQuote(toolsBase),
       "-Force",
     ]);
     const inner = join(toolsBase, "cmdline-tools");
     ensureDir(latestDir);
     try {
-      if (existsSync(join(inner, "bin"))) {
-        renameSync(inner, latestDir);
-      } else if (existsSync(join(inner, "cmdline-tools", "bin"))) {
+      if (existsSync(join(inner, "bin"))) renameSync(inner, latestDir);
+      else if (existsSync(join(inner, "cmdline-tools", "bin")))
         renameSync(join(inner, "cmdline-tools"), latestDir);
-      }
     } catch {}
   } else {
     await run("unzip", ["-o", zip, "-d", toolsBase]);
@@ -724,9 +709,8 @@ async function ensureViteDevServer() {
   console.log("\n🧠 Checking Vite dev server (http://localhost:5173) ...");
   const nodeMajor = getNodeMajor();
   const canFetch = typeof fetch === "function";
-  if (!canFetch && nodeMajor < 18) {
+  if (!canFetch && nodeMajor < 18)
     console.log("ℹ️ Node 18+ 권장. 현재 환경에선 바로 실행 시도.");
-  }
   let ok = false;
   if (canFetch) {
     try {
