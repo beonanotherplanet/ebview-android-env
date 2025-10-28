@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
- * Android AVD Auto Setup (Windows 10 전용 + mac 호환)
- * - JAVA_HOME/`java` 미존재 환경에서도 자체 JDK(zip) 설치하여 강제 주입
+ * Android AVD Auto Setup (Windows 우선 + mac 호환)
+ * - JAVA_HOME 없을 때 포터블 JDK(zip) 설치/주입
  * - SDK cmdline-tools 구조 자동 교정
- * - sdkmanager/avdmanager/emulator/adb 전체 절대경로 사용 + env 강제 주입
+ * - Windows 방화벽에 adb.exe 허용 규칙 자동 추가
+ * - 에뮬레이터 부팅 완료까지 대기 (wait-for-device + sys.boot_completed)
+ * - 이후 모든 adb 호출은 고정된 serial(-s) 사용
  */
 
 import inquirer from "inquirer";
@@ -87,6 +89,10 @@ function normalizeIniPath(p: string): string {
 function getNodeMajor(): number {
   return parseInt(process.versions.node.split(".")[0], 10);
 }
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
   return new Promise<void>((res, rej) => {
     const p = spawn(cmd, args, { stdio: "inherit", shell: true, ...opts });
@@ -95,6 +101,30 @@ function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
     );
   });
 }
+
+async function runAndGetStdout(
+  cmd: string,
+  args: string[] = [],
+  opts: any = {}
+): Promise<string> {
+  return new Promise<string>((res, rej) => {
+    const p = spawn(cmd, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: true,
+      ...opts,
+    });
+    let out = "",
+      err = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.stderr.on("data", (d) => (err += d.toString()));
+    p.on("exit", (code) =>
+      code === 0
+        ? res(out || err)
+        : rej(new Error((out + err).trim() || `${cmd} exited ${code}`))
+    );
+  });
+}
+
 async function downloadFile(url: string, dest: string): Promise<void> {
   console.log(`[download] ${url}`);
   await new Promise<void>((res, rej) => {
@@ -142,6 +172,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
     request(url);
   });
 }
+
 function detectAndroidStudioSdk(): string | null {
   const studioPaths = isWindows
     ? [
@@ -189,7 +220,7 @@ async function runPSScript(
   }
 }
 
-/** 런타임 env 강제 주입 (JAVA_HOME/PATH, ANDROID_HOME/SDK_ROOT) */
+/** 런타임 env 강제 주입 */
 function runtimeEnv(params: {
   androidHome: string;
   javaHome?: string;
@@ -258,11 +289,12 @@ function getSdkTools(androidHome: string) {
 }
 
 /* ────────────────────────────────────────────────
-   JDK 17 확보 (포터블 ZIP 설치 경로)
+   JDK 17 (포터블 ZIP 설치)
 ──────────────────────────────────────────────── */
 const JDK_ZIP_URL =
   "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jdk_x64_windows_hotspot_17.0.13_11.zip";
 const LOCAL_JDK_DIR = join(HOME, "AppData", "Local", "JDK", "temurin-17");
+
 function tryDeriveJavaHomeFromWhere(): string | null {
   try {
     const out = execSync("where java", { stdio: ["ignore", "pipe", "pipe"] })
@@ -328,9 +360,7 @@ async function ensureJava17OrLater(): Promise<string> {
         return guessed;
       }
     }
-  } catch {
-    /* no java */
-  }
+  } catch {}
 
   if (!isWindows)
     throw new Error("Java JDK 17+ is required. Please install JDK 17+.");
@@ -340,7 +370,6 @@ async function ensureJava17OrLater(): Promise<string> {
   const zipPath = join(TMP, "temurin17.zip");
   await downloadFile(JDK_ZIP_URL, zipPath);
 
-  // ⬇⬇⬇ 여기 수정: 문자열 join 사용하지 않고 runPSScript 로 실행 ⬇⬇⬇
   const ps = [
     "$ErrorActionPreference = 'Stop'",
     `if (Test-Path ${psq(
@@ -367,9 +396,8 @@ async function ensureJava17OrLater(): Promise<string> {
     if (existsSync(join(LOCAL_JDK_DIR, "bin", "java.exe")))
       javaHome = LOCAL_JDK_DIR;
   }
-  if (!javaHome || !existsSync(join(javaHome, "bin", "java.exe"))) {
+  if (!javaHome || !existsSync(join(javaHome, "bin", "java.exe")))
     throw new Error("Portable JDK 설치 실패 (java.exe 미발견)");
-  }
 
   process.env.JAVA_HOME = javaHome;
   process.env.PATH = `${join(javaHome, "bin")};${process.env.PATH ?? ""}`;
@@ -378,7 +406,7 @@ async function ensureJava17OrLater(): Promise<string> {
 }
 
 /* ────────────────────────────────────────────────
-   SDK Setup (zip 구조 꼬임 자동 교정)
+   SDK Setup
 ──────────────────────────────────────────────── */
 async function ensureSdk(androidHome: string): Promise<void> {
   const toolsBase = join(androidHome, "cmdline-tools");
@@ -404,9 +432,9 @@ async function ensureSdk(androidHome: string): Promise<void> {
       "-ExecutionPolicy",
       "Bypass",
       "Expand-Archive",
-      `-Path`,
+      "-Path",
       shQuote(zip),
-      `-DestinationPath`,
+      "-DestinationPath",
       shQuote(toolsBase),
       "-Force",
     ]);
@@ -436,7 +464,7 @@ async function ensureSdk(androidHome: string): Promise<void> {
 }
 
 /* ────────────────────────────────────────────────
-   Licenses / Installs (항상 env 강제 주입)
+   Licenses / Installs
 ──────────────────────────────────────────────── */
 async function acceptLicenses(
   androidHome: string,
@@ -580,6 +608,38 @@ async function installPlatformTools(
 }
 
 /* ────────────────────────────────────────────────
+   Windows 방화벽: adb.exe 허용 규칙 추가
+──────────────────────────────────────────────── */
+async function ensureWindowsFirewallForAdb(adbPath: string) {
+  if (!isWindows) return;
+  const ruleNameIn = "ADB Inbound Allow";
+  const ruleNameOut = "ADB Outbound Allow";
+  const ps = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    // Inbound
+    `if (-not (Get-NetFirewallApplicationFilter -PolicyStore ActiveStore | Where-Object { $_.Program -ieq ${psq(
+      adbPath
+    )} })) {`,
+    `  New-NetFirewallRule -DisplayName ${psq(
+      ruleNameIn
+    )} -Direction Inbound -Action Allow -Program ${psq(
+      adbPath
+    )} -Profile Any | Out-Null`,
+    `  New-NetFirewallRule -DisplayName ${psq(
+      ruleNameOut
+    )} -Direction Outbound -Action Allow -Program ${psq(
+      adbPath
+    )} -Profile Any | Out-Null`,
+    `}`,
+  ].join("\r\n");
+  try {
+    await runPSScript(ps);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* ────────────────────────────────────────────────
    AVD Creation
 ──────────────────────────────────────────────── */
 async function createAvd(
@@ -661,13 +721,13 @@ async function createAvd(
 }
 
 /* ────────────────────────────────────────────────
-   Emulator Launcher
+   Emulator Launcher + 부팅 완료 대기
 ──────────────────────────────────────────────── */
 async function launchEmulator(
   androidHome: string,
   avdName: string,
   javaHome: string
-) {
+): Promise<void> {
   console.log(`🚀 Launching emulator: ${avdName}...`);
   let { emulatorCmd } = getSdkTools(androidHome);
 
@@ -699,7 +759,72 @@ async function launchEmulator(
     env: runtimeEnv({ androidHome, javaHome }),
   });
   proc.on("error", (err) => console.error("✖ Emulator failed:", err.message));
-  console.log("✔ Emulator process started. Booting may take ~30s.");
+  console.log("✔ Emulator process started.");
+}
+
+/** ADB 서버/디바이스 준비 */
+async function prepareAdbAndGetSerial(
+  adbPath: string,
+  androidHome: string,
+  javaHome: string
+): Promise<string> {
+  await ensureWindowsFirewallForAdb(adbPath);
+
+  // 같은 PATH의 다른 adb와 충돌 방지: 우리가 지정한 adb로 서버 재시작
+  try {
+    await run(shQuote(adbPath), ["kill-server"], {
+      env: runtimeEnv({ androidHome, javaHome }),
+    });
+  } catch {}
+  await run(shQuote(adbPath), ["start-server"], {
+    env: runtimeEnv({ androidHome, javaHome }),
+  });
+
+  // 에뮬레이터 탐색 루프
+  const deadline = Date.now() + 180_000; // 최대 3분
+  let serial = "";
+  while (Date.now() < deadline) {
+    const out = await runAndGetStdout(shQuote(adbPath), ["devices"], {
+      env: runtimeEnv({ androidHome, javaHome }),
+    });
+    const lines = out.split(/\r?\n/).map((s) => s.trim());
+    const devs = lines
+      .filter((l) => l && !l.toLowerCase().startsWith("list of devices"))
+      .map((l) => l.split(/\s+/))
+      .filter((cols) => cols[1] === "device" || cols[1] === "offline");
+    const emu = devs.find((cols) => cols[0]?.startsWith("emulator-"));
+    if (emu && emu[0]) {
+      serial = emu[0];
+      if (emu[1] === "offline") {
+        // 조금 더 대기
+        await sleep(2000);
+      } else {
+        break;
+      }
+    } else {
+      await sleep(2000);
+    }
+  }
+  if (!serial) throw new Error("adb: no emulator device detected (timeout).");
+
+  // 완전 부팅 대기: sys.boot_completed == 1
+  const bootDeadline = Date.now() + 180_000;
+  while (Date.now() < bootDeadline) {
+    try {
+      const val = await runAndGetStdout(
+        shQuote(adbPath),
+        ["-s", serial, "shell", "getprop", "sys.boot_completed"],
+        { env: runtimeEnv({ androidHome, javaHome }) }
+      );
+      if (val.trim() === "1") {
+        // 잠시 더 대기 (launcher 안정화)
+        await sleep(2000);
+        break;
+      }
+    } catch {}
+    await sleep(1500);
+  }
+  return serial;
 }
 
 /* ────────────────────────────────────────────────
@@ -727,7 +852,7 @@ async function ensureViteDevServer() {
       detached: true,
     });
     console.log("⏳ Waiting for Vite server to start...");
-    await new Promise((res) => setTimeout(res, 7000));
+    await sleep(7000);
   } else {
     console.log("✅ Vite dev server already running.");
   }
@@ -740,7 +865,7 @@ async function main() {
   console.log("\x1b[33m=== Android SDK Auto Setup ===\x1b[0m\n");
   if (isWindows) console.log(`ℹ️ Windows ${release()}`);
 
-  // 1) 자바 확보 (포터블 zip 설치로 JAVA_HOME 보장)
+  // 1) 자바 확보
   const JAVA_HOME_RUNTIME = await ensureJava17OrLater();
   console.log(
     `🔎 JAVA_HOME (runtime): ${
@@ -758,10 +883,10 @@ async function main() {
   ensureDir(ANDROID_HOME);
   console.log(`📦 Using Android SDK path: ${ANDROID_HOME}`);
 
-  // 3) cmdline-tools 설치/정규화
+  // 3) cmdline-tools 설치
   await ensureSdk(ANDROID_HOME);
 
-  // 4) 라이선스 동의
+  // 4) 라이선스
   const { sdkm } = getSdkTools(ANDROID_HOME);
   if (!sdkm) throw new Error("sdkmanager not found");
   await acceptLicenses(
@@ -794,29 +919,45 @@ async function main() {
     JAVA_HOME_RUNTIME || process.env.JAVA_HOME || ""
   );
 
-  console.log("\n✅ Setup complete and emulator launched!");
+  console.log("\n✅ Emulator launched, waiting for ADB device...");
 
-  // 7) Vite dev server
+  // 7) ADB 디바이스 등장/부팅까지 대기 + 시리얼 획득
+  const { adb } = getSdkTools(ANDROID_HOME);
+  if (!adb) throw new Error("adb not found after installation.");
+  const serial = await prepareAdbAndGetSerial(
+    adb!,
+    ANDROID_HOME,
+    JAVA_HOME_RUNTIME || process.env.JAVA_HOME || ""
+  );
+  console.log(`✔ Emulator ready: ${serial}`);
+
+  // 8) Vite dev server
   await ensureViteDevServer();
 
-  // 8) APK 설치/실행
+  // 9) APK 설치/실행
   const apkPath = join(process.cwd(), "app-debug.apk");
   if (!existsSync(apkPath)) {
     console.error(`❌ APK not found at ${apkPath}`);
     process.exit(1);
   }
-  const { adb } = getSdkTools(ANDROID_HOME);
-  if (!adb) throw new Error("adb not found after installation.");
 
   console.log("📱 Installing APK...");
-  await run(shQuote(adb), ["install", "-r", shQuote(apkPath)], {
+  await run(shQuote(adb!), ["-s", serial, "install", "-r", shQuote(apkPath)], {
     env: runtimeEnv({ androidHome: ANDROID_HOME, javaHome: JAVA_HOME_RUNTIME }),
   });
 
   console.log("\n🚀 Launching WebView app...");
   await run(
-    shQuote(adb),
-    ["shell", "am", "start", "-n", "com.ebview.android/.MainActivity"],
+    shQuote(adb!),
+    [
+      "-s",
+      serial,
+      "shell",
+      "am",
+      "start",
+      "-n",
+      "com.ebview.android/.MainActivity",
+    ],
     {
       env: runtimeEnv({
         androidHome: ANDROID_HOME,
@@ -825,12 +966,18 @@ async function main() {
     }
   );
 
-  // 9) Chrome DevTools
+  // 10) Chrome DevTools
   console.log("\n🌐 Setting up Chrome remote debugging...");
   try {
     await run(
-      shQuote(adb),
-      ["forward", "tcp:9222", "localabstract:chrome_devtools_remote"],
+      shQuote(adb!),
+      [
+        "-s",
+        serial,
+        "forward",
+        "tcp:9222",
+        "localabstract:chrome_devtools_remote",
+      ],
       {
         env: runtimeEnv({
           androidHome: ANDROID_HOME,
@@ -838,12 +985,16 @@ async function main() {
         }),
       }
     );
-    await run(shQuote(adb), ["reverse", "tcp:5173", "tcp:5173"], {
-      env: runtimeEnv({
-        androidHome: ANDROID_HOME,
-        javaHome: JAVA_HOME_RUNTIME,
-      }),
-    });
+    await run(
+      shQuote(adb!),
+      ["-s", serial, "reverse", "tcp:5173", "tcp:5173"],
+      {
+        env: runtimeEnv({
+          androidHome: ANDROID_HOME,
+          javaHome: JAVA_HOME_RUNTIME,
+        }),
+      }
+    );
 
     console.log("🧭 Opening Chrome debugger...");
     if (isWindows) {
