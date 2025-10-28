@@ -83,6 +83,33 @@ function shQuote(p: string) {
   return p;
 }
 
+// 파일 상단 유틸 섹션 근처에 추가
+function psq(s: string): string {
+  // PowerShell 단일따옴표 리터럴('...')로 안전 포장
+  // 내부 ' → '' 로 이스케이프
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+async function runPSScript(scriptContent: string, opts: any = {}) {
+  const psPath = join(TMP, `__tmp_${Date.now()}.ps1`);
+  writeFileSync(psPath, scriptContent, "utf8");
+  try {
+    await run(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psPath],
+      opts
+    );
+  } finally {
+    try {
+      require("node:fs").unlinkSync(psPath);
+    } catch {}
+  }
+}
+
+function mergedEnv(extra: Record<string, string>) {
+  return { ...process.env, ...extra };
+}
+
 function run(cmd: string, args: string[] = [], opts: any = {}) {
   // shell:true + 전체 stdio 상속 (경로 공백, .bat 호출 안전)
   return new Promise<void>((res, rej) => {
@@ -339,27 +366,46 @@ function getSdkTools(androidHome: string) {
   return { sdkm, avdm, emulatorCmd, adb };
 }
 
-async function acceptLicenses(androidHome: string, sdkm: string) {
+// ────────────────────────────────────────────────
+// sdkmanager 라이선스 동의 (Windows 파이프/따옴표 이슈 해결판)
+// ────────────────────────────────────────────────
+async function acceptLicenses(
+  androidHome: string,
+  sdkm: string
+): Promise<void> {
   console.log("📝 Accepting SDK licenses...");
+
   if (isWindows) {
-    await run(
-      "powershell",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        `cmd /c "echo y | ${shQuote(sdkm)} --sdk_root=${shQuote(
-          androidHome
-        )} --licenses"`,
-      ],
-      { windowsHide: true }
-    );
-  } else {
-    await run("bash", [
-      "-lc",
-      `yes | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses`,
-    ]);
+    // PowerShell 스크립트를 라인 배열로 구성 → join으로 안전한 문자열 생성
+    const psLines: string[] = [
+      "$ErrorActionPreference = 'Stop'",
+      `$sdk  = ${psq(sdkm)}`,
+      `$root = ${psq(androidHome)}`,
+      'if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }',
+      "try { Unblock-File -Path $sdk } catch {}",
+      // 버전 출력(디버깅)
+      "& $sdk --sdk_root=$root --version | Out-Host",
+      // 'y' 50회 생성해서 파이프 (yes 대체)
+      "$yes = @()",
+      "1..50 | ForEach-Object { $yes += 'y' }",
+      '$yes -join "`n" | & $sdk --sdk_root=$root --licenses | Out-Host',
+    ];
+    const script = psLines.join("\r\n");
+
+    await runPSScript(script, {
+      env: mergedEnv({
+        ANDROID_HOME: androidHome,
+        ANDROID_SDK_ROOT: androidHome,
+      }),
+    });
+    return;
   }
+
+  // mac/Linux 경로 (기존 유지)
+  await run("bash", [
+    "-lc",
+    `yes | ${shQuote(sdkm)} --sdk_root=${shQuote(androidHome)} --licenses`,
+  ]);
 }
 
 /* ────────────────────────────────────────────────
@@ -378,32 +424,77 @@ async function installPlatformTools(androidHome: string, api: string) {
  - platforms;${api}
  - ${systemImagePath}
  - extras;intel;Hardware_Accelerated_Execution_Manager (best-effort)
- - extras;google;gdk (best-effort, device profiles)
+ - extras;google;gdk (best-effort)
 `);
 
-  // 필수 패키지
-  await run(shQuote(sdkm), [
-    `--sdk_root=${shQuote(androidHome)}`,
-    "platform-tools",
-    "emulator",
-    `platforms;${api}`,
-    systemImagePath,
-  ]);
+  if (isWindows) {
+    const psInstall = (pkgs: string[]) => `
+$ErrorActionPreference = 'Stop'
+$sdk = "${psq(sdkm)}"
+$root = "${psq(androidHome)}"
+if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }
+try { Unblock-File -Path $sdk } catch {}
+& $sdk --sdk_root=$root ${pkgs.map((p) => `"${p}"`).join(" ")} | Out-Host
+`;
 
-  // 선택(있으면 설치, 없어도 무시)
-  try {
+    // 필수 패키지
+    await runPSScript(
+      psInstall([
+        "platform-tools",
+        "emulator",
+        `platforms;${api}`,
+        systemImagePath,
+      ]),
+      {
+        env: mergedEnv({
+          ANDROID_HOME: androidHome,
+          ANDROID_SDK_ROOT: androidHome,
+        }),
+      }
+    );
+
+    // 선택 패키지 (있으면 설치)
+    try {
+      await runPSScript(psInstall(["extras;google;gdk"]), {
+        env: mergedEnv({
+          ANDROID_HOME: androidHome,
+          ANDROID_SDK_ROOT: androidHome,
+        }),
+      });
+    } catch {}
+    try {
+      await runPSScript(
+        psInstall(["extras;intel;Hardware_Accelerated_Execution_Manager"]),
+        {
+          env: mergedEnv({
+            ANDROID_HOME: androidHome,
+            ANDROID_SDK_ROOT: androidHome,
+          }),
+        }
+      );
+    } catch {}
+  } else {
+    // 기존 mac/linux 로직 유지
     await run(shQuote(sdkm), [
       `--sdk_root=${shQuote(androidHome)}`,
-      "extras;google;gdk",
+      "platform-tools",
+      "emulator",
+      `platforms;${api}`,
+      systemImagePath,
     ]);
-  } catch {}
-
-  try {
-    await run(shQuote(sdkm), [
-      `--sdk_root=${shQuote(androidHome)}`,
-      "extras;intel;Hardware_Accelerated_Execution_Manager",
-    ]);
-  } catch {}
+    try {
+      await run(shQuote(sdkm), [
+        `--sdk_root=${shQuote(androidHome)}`,
+        "extras;google;gdk",
+      ]);
+    } catch {}
+    try {
+      await run(shQuote(sdkm), [
+        `--sdk_root=${shQuote(androidHome)}`,
+        "extras;intel;Hardware_Accelerated_Execution_Manager",
+      ]);
+    } catch {}
+  }
 
   return { sysImg, abi };
 }
