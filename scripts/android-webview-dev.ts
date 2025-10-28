@@ -77,6 +77,45 @@ const DEVICE_PRESETS: Record<
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
+// 추가: 상단 유틸 근처
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function killStaleEmulators(): Promise<void> {
+  // qemu-system, emulator, aapt/adb 잔여 프로세스 종료
+  if (isWindows) {
+    try {
+      await run("taskkill", ["/F", "/IM", "qemu-system-x86_64.exe"], {
+        shell: true,
+      });
+    } catch {}
+    try {
+      await run("taskkill", ["/F", "/IM", "qemu-system-aarch64.exe"], {
+        shell: true,
+      });
+    } catch {}
+    try {
+      await run("taskkill", ["/F", "/IM", "emulator.exe"], { shell: true });
+    } catch {}
+    // adb는 곧 재시작할 거라 일단 kill
+    try {
+      await run("taskkill", ["/F", "/IM", "adb.exe"], { shell: true });
+    } catch {}
+  } else {
+    try {
+      await run("pkill", ["-f", "qemu-system-"], {});
+    } catch {}
+    try {
+      await run("pkill", ["-f", "/emulator$"], {});
+    } catch {}
+    try {
+      await run("pkill", ["-f", "/adb$"], {});
+    } catch {}
+  }
+  await sleep(1000);
+}
+
 function shQuote(p: string): string {
   return p.includes(" ") ? `"${p}"` : p;
 }
@@ -88,9 +127,6 @@ function normalizeIniPath(p: string): string {
 }
 function getNodeMajor(): number {
   return parseInt(process.versions.node.split(".")[0], 10);
-}
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 function run(cmd: string, args: string[] = [], opts: any = {}): Promise<void> {
@@ -723,12 +759,13 @@ async function createAvd(
 /* ────────────────────────────────────────────────
    Emulator Launcher + 부팅 완료 대기
 ──────────────────────────────────────────────── */
+// 기존 launchEmulator(...)를 이 버전으로 교체
 async function launchEmulator(
   androidHome: string,
   avdName: string,
   javaHome: string
-): Promise<void> {
-  console.log(`🚀 Launching emulator: ${avdName}...`);
+): Promise<number> {
+  console.log(`🚀 Launching emulator (cold boot): ${avdName}...`);
   let { emulatorCmd } = getSdkTools(androidHome);
 
   if (!emulatorCmd) {
@@ -738,93 +775,98 @@ async function launchEmulator(
   }
   if (!emulatorCmd) throw new Error("emulator not found after installation");
 
-  if (isWindows) {
-    const ps = [
-      "$ErrorActionPreference = 'Stop'",
-      `$emu = ${psq(emulatorCmd)}`,
-      "try { Unblock-File -Path $emu } catch {}",
-    ].join("\r\n");
-    await runPSScript(ps, { env: runtimeEnv({ androidHome, javaHome }) });
-  }
+  // 혹시 남아있는 프로세스가 있으면 정리
+  await killStaleEmulators();
 
-  const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
-  const accelArgs = isMac
+  // 포트 고정(5554). 이미 점유된 경우 5556 시도.
+  const candidatePorts = [5554, 5556, 5558];
+  let chosenPort = candidatePorts[0];
+
+  // 기본 공통 옵션: 완전 콜드부트(+스냅샷 비활성화, 부트애님 비활성화)
+  const baseArgs = (port: number) => [
+    "-avd",
+    avdName,
+    "-port",
+    String(port),
+    "-no-snapshot",
+    "-no-snapshot-save",
+    "-no-boot-anim",
+    "-netdelay",
+    "none",
+    "-netspeed",
+    "full",
+  ];
+
+  // 1차 시도: 가속 사용
+  const accelOn = isMac
     ? ["-feature", "HVF", "-accel", "auto", "-gpu", "host"]
     : ["-accel", "on", "-gpu", "host"];
+  // 2차 시도: 가속 끄기(일부 WHPX/Hyper-V 충돌 환경)
+  const accelOff = ["-accel", "off", "-gpu", "swiftshader_indirect"];
 
-  const proc = spawn(shQuote(emulatorCmd), [...baseArgs, ...accelArgs], {
-    stdio: "inherit",
-    detached: true,
-    shell: true,
-    env: runtimeEnv({ androidHome, javaHome }),
-  });
-  proc.on("error", (err) => console.error("✖ Emulator failed:", err.message));
-  console.log("✔ Emulator process started.");
-}
+  // 포트 가용성 순회
+  for (const p of candidatePorts) {
+    try {
+      // 가속 ON 시도
+      chosenPort = p;
+      console.log(`▶ trying port=${p} accel=on ...`);
+      const proc1 = spawn(shQuote(emulatorCmd), [...baseArgs(p), ...accelOn], {
+        stdio: "inherit",
+        detached: true,
+        shell: true,
+        env: runtimeEnv({ androidHome, javaHome }),
+      });
+      proc1.on("error", (e) =>
+        console.error("emulator spawn error:", e.message)
+      );
+      // 20초 안에 ADB가 에뮬레이터 포트를 잡으면 성공으로 간주
+      const ok = await waitEmulatorPortDetected(p, 20_000);
+      if (ok) return p;
 
-/** ADB 서버/디바이스 준비 */
-async function prepareAdbAndGetSerial(
-  adbPath: string,
-  androidHome: string,
-  javaHome: string
-): Promise<string> {
-  await ensureWindowsFirewallForAdb(adbPath);
+      // 실패하면 프로세스 정리 후 가속 OFF 재시도
+      await killStaleEmulators();
+      console.log(`▶ retry port=${p} accel=off ...`);
+      const proc2 = spawn(shQuote(emulatorCmd), [...baseArgs(p), ...accelOff], {
+        stdio: "inherit",
+        detached: true,
+        shell: true,
+        env: runtimeEnv({ androidHome, javaHome }),
+      });
+      proc2.on("error", (e) =>
+        console.error("emulator spawn error:", e.message)
+      );
+      const ok2 = await waitEmulatorPortDetected(p, 25_000);
+      if (ok2) return p;
 
-  // 같은 PATH의 다른 adb와 충돌 방지: 우리가 지정한 adb로 서버 재시작
-  try {
-    await run(shQuote(adbPath), ["kill-server"], {
-      env: runtimeEnv({ androidHome, javaHome }),
-    });
-  } catch {}
-  await run(shQuote(adbPath), ["start-server"], {
-    env: runtimeEnv({ androidHome, javaHome }),
-  });
-
-  // 에뮬레이터 탐색 루프
-  const deadline = Date.now() + 180_000; // 최대 3분
-  let serial = "";
-  while (Date.now() < deadline) {
-    const out = await runAndGetStdout(shQuote(adbPath), ["devices"], {
-      env: runtimeEnv({ androidHome, javaHome }),
-    });
-    const lines = out.split(/\r?\n/).map((s) => s.trim());
-    const devs = lines
-      .filter((l) => l && !l.toLowerCase().startsWith("list of devices"))
-      .map((l) => l.split(/\s+/))
-      .filter((cols) => cols[1] === "device" || cols[1] === "offline");
-    const emu = devs.find((cols) => cols[0]?.startsWith("emulator-"));
-    if (emu && emu[0]) {
-      serial = emu[0];
-      if (emu[1] === "offline") {
-        // 조금 더 대기
-        await sleep(2000);
-      } else {
-        break;
-      }
-    } else {
-      await sleep(2000);
+      // 다음 포트로
+      await killStaleEmulators();
+    } catch (e: any) {
+      console.log(`ℹ️ port ${p} attempt failed: ${e?.message ?? e}`);
+      await killStaleEmulators();
     }
   }
-  if (!serial) throw new Error("adb: no emulator device detected (timeout).");
 
-  // 완전 부팅 대기: sys.boot_completed == 1
-  const bootDeadline = Date.now() + 180_000;
-  while (Date.now() < bootDeadline) {
+  throw new Error("failed to launch emulator on any candidate port");
+}
+
+// 에뮬레이터 포트 감지: adb devices에 emulator-PORT 등장 여부
+async function waitEmulatorPortDetected(
+  port: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const { adb } = getSdkTools(
+    process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME || DEFAULT_SDK_PATH
+  );
+  if (!adb) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
-      const val = await runAndGetStdout(
-        shQuote(adbPath),
-        ["-s", serial, "shell", "getprop", "sys.boot_completed"],
-        { env: runtimeEnv({ androidHome, javaHome }) }
-      );
-      if (val.trim() === "1") {
-        // 잠시 더 대기 (launcher 안정화)
-        await sleep(2000);
-        break;
-      }
+      const out = await runAndGetStdout(shQuote(adb), ["devices"]);
+      if (out.includes(`emulator-${port}`)) return true;
     } catch {}
-    await sleep(1500);
+    await sleep(1000);
   }
-  return serial;
+  return false;
 }
 
 /* ────────────────────────────────────────────────
@@ -1026,6 +1068,83 @@ async function main() {
   console.log(
     "\n🎉 All steps completed! WebView should now show your Vite app."
   );
+}
+
+// 기존 prepareAdbAndGetSerial(...)를 이 버전으로 교체
+async function prepareAdbAndGetSerial(
+  adbPath: string,
+  androidHome: string,
+  javaHome: string,
+  portHint?: number
+): Promise<string> {
+  await ensureWindowsFirewallForAdb(adbPath);
+
+  // 우리가 지정한 adb로 서버 재기동
+  try {
+    await run(shQuote(adbPath), ["kill-server"], {
+      env: runtimeEnv({ androidHome, javaHome }),
+    });
+  } catch {}
+  await run(shQuote(adbPath), ["start-server"], {
+    env: runtimeEnv({ androidHome, javaHome }),
+  });
+
+  const deadline = Date.now() + 240_000; // 최대 4분 (콜드부트 고려)
+  let lastLog = 0;
+  while (Date.now() < deadline) {
+    const out = await runAndGetStdout(shQuote(adbPath), ["devices"], {
+      env: runtimeEnv({ androidHome, javaHome }),
+    });
+    const lines = out.split(/\r?\n/).map((s) => s.trim());
+    const devs = lines
+      .filter((l) => l && !l.toLowerCase().startsWith("list of devices"))
+      .map((l) => l.split(/\s+/));
+
+    // 포트 힌트가 있으면 그 포트를 우선
+    let pick = devs.find(
+      (cols) =>
+        cols[0]?.startsWith(`emulator-${portHint ?? -1}`) &&
+        (cols[1] === "device" || cols[1] === "offline")
+    );
+    if (!pick)
+      pick = devs.find(
+        (cols) =>
+          cols[0]?.startsWith("emulator-") &&
+          (cols[1] === "device" || cols[1] === "offline")
+      );
+
+    if (pick?.[0]) {
+      const serial = pick[0];
+      // 완전 부팅 대기
+      const bootDeadline = Date.now() + 240_000;
+      while (Date.now() < bootDeadline) {
+        try {
+          const val = await runAndGetStdout(
+            shQuote(adbPath),
+            ["-s", serial, "shell", "getprop", "sys.boot_completed"],
+            { env: runtimeEnv({ androidHome, javaHome }) }
+          );
+          if (val.trim() === "1") {
+            await sleep(1500); // 런처 안정화
+            return serial;
+          }
+        } catch {}
+        if (Date.now() - lastLog > 5000) {
+          console.log("⏳ waiting for sys.boot_completed=1 ...");
+          lastLog = Date.now();
+        }
+        await sleep(1500);
+      }
+      throw new Error("timeout: sys.boot_completed never reached 1");
+    }
+
+    if (Date.now() - lastLog > 5000) {
+      console.log("⏳ waiting for emulator to appear in `adb devices` ...");
+      lastLog = Date.now();
+    }
+    await sleep(1500);
+  }
+  throw new Error("adb: no emulator device detected (timeout).");
 }
 
 main().catch((e) => {
