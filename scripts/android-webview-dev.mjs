@@ -353,6 +353,34 @@ async function main() {
     "com.ebview.android/.MainActivity",
   ]);
 
+  // console.log("\n🌐 Setting up Chrome remote debugging...");
+
+  // // 4️⃣ WebView 디버깅 포트 연결
+  // try {
+  //   // WebView 디버거 포트 포워딩
+  //   execSync(`${adb} forward tcp:9222 localabstract:chrome_devtools_remote`, {
+  //     stdio: "inherit",
+  //   });
+
+  //   // Vite 개발 서버 연결
+  //   execSync(`${adb} reverse tcp:5173 tcp:5173`, { stdio: "inherit" });
+
+  //   // Chrome 디버거 열기
+  //   console.log("🧭 Opening Chrome debugger...");
+  //   if (isWindows)
+  //     spawn("cmd", ["/c", "start", "chrome", "chrome://inspect/#devices"], {
+  //       detached: true,
+  //     });
+  //   else if (isMac)
+  //     spawn("open", ["-a", "Google Chrome", "chrome://inspect/#devices"], {
+  //       detached: true,
+  //     });
+
+  //   console.log("✅ Chrome DevTools opened. You can now inspect your WebView.");
+  // } catch (err) {
+  //   console.error("⚠️ Failed to open Chrome DevTools:", err.message);
+  // }
+
   console.log(
     "\n🎉 All steps completed! WebView should now show your Vite app."
   );
