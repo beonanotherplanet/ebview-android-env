@@ -204,10 +204,22 @@ async function runPSScript(
   }
 }
 
-function mergedEnv(
-  extra: Record<string, string | undefined>
-): NodeJS.ProcessEnv {
-  return { ...process.env, ...extra };
+/** 런타임에서 ANDROID/JAVA 환경을 **명시 주입** */
+function runtimeEnv(params: {
+  androidHome: string;
+  javaHome?: string;
+}): NodeJS.ProcessEnv {
+  const base = { ...process.env };
+  base.ANDROID_HOME = params.androidHome;
+  base.ANDROID_SDK_ROOT = params.androidHome;
+  if (isWindows) {
+    const jh = (params.javaHome ?? process.env.JAVA_HOME ?? "").trim();
+    if (jh) {
+      base.JAVA_HOME = jh;
+      base.PATH = `${join(jh, "bin")};${base.PATH ?? ""}`;
+    }
+  }
+  return base;
 }
 
 /* ────────────────────────────────────────────────
@@ -310,7 +322,8 @@ function findWindowsJavaHome(): string | null {
   return null;
 }
 
-async function ensureJava17OrLater(): Promise<void> {
+/** Java 17+ 보장: 설치 후 JAVA_HOME 경로 **반환** */
+async function ensureJava17OrLater(): Promise<string> {
   let hasJava = false;
   let versionText = "";
 
@@ -332,7 +345,10 @@ async function ensureJava17OrLater(): Promise<void> {
       const major = parseInt(ver.split(".")[0], 10);
       if (Number.isFinite(major) && major >= 17) {
         console.log(`✔ Java ${ver} detected`);
-        return;
+        const guessed = isWindows
+          ? findWindowsJavaHome()
+          : process.env.JAVA_HOME ?? "";
+        return guessed ?? "";
       }
     }
     console.log(`⚠️ Java 감지됨 (${versionText}) 하지만 17 미만입니다.`);
@@ -363,14 +379,18 @@ async function ensureJava17OrLater(): Promise<void> {
     throw new Error("JDK 17 설치 실패");
   }
 
-  const javaHome = findWindowsJavaHome();
+  const javaHome = findWindowsJavaHome() ?? "";
   if (javaHome) {
+    // 현재 프로세스에 즉시 반영(자식 프로세스 기본 상속)
     process.env.JAVA_HOME = javaHome;
-    process.env.PATH = `${join(javaHome, "bin")};${process.env.PATH}`;
+    process.env.PATH = `${join(javaHome, "bin")};${process.env.PATH ?? ""}`;
     console.log(`📦 JAVA_HOME set to: ${javaHome}`);
   } else {
-    console.warn("⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다.");
+    console.warn(
+      "⚠️ JAVA_HOME 경로를 자동으로 찾지 못했습니다. (PATH 상의 java를 시도)"
+    );
   }
+  return javaHome;
 }
 
 /* ────────────────────────────────────────────────
@@ -444,11 +464,12 @@ async function ensureSdk(androidHome: string): Promise<void> {
 }
 
 /* ────────────────────────────────────────────────
-   Licenses (PowerShell-safe)
+   Licenses (PowerShell-safe + env 강제 주입)
 ──────────────────────────────────────────────── */
 async function acceptLicenses(
   androidHome: string,
-  sdkm: string
+  sdkm: string,
+  javaHome?: string
 ): Promise<void> {
   console.log("📝 Accepting SDK licenses...");
 
@@ -457,6 +478,9 @@ async function acceptLicenses(
       "$ErrorActionPreference = 'Stop'",
       `$sdk  = ${psq(sdkm)}`,
       `$root = ${psq(androidHome)}`,
+      `$env:ANDROID_HOME = ${psq(androidHome)}`,
+      `$env:ANDROID_SDK_ROOT = ${psq(androidHome)}`,
+      "if ($env:JAVA_HOME -and (Test-Path ($env:JAVA_HOME + '\\bin'))) { $env:PATH = ($env:JAVA_HOME + '\\bin;' + $env:PATH) }",
       'if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }',
       "try { Unblock-File -Path $sdk } catch {}",
       "& $sdk --sdk_root=$root --version | Out-Host",
@@ -465,10 +489,7 @@ async function acceptLicenses(
       '$yes -join "`n" | & $sdk --sdk_root=$root --licenses | Out-Host',
     ];
     await runPSScript(psLines.join("\r\n"), {
-      env: mergedEnv({
-        ANDROID_HOME: androidHome,
-        ANDROID_SDK_ROOT: androidHome,
-      }),
+      env: runtimeEnv({ androidHome, javaHome }),
     });
     return;
   }
@@ -482,7 +503,10 @@ async function acceptLicenses(
 /* ────────────────────────────────────────────────
    Packages Installer (emulator 포함)
 ──────────────────────────────────────────────── */
-async function ensureEmulatorInstalled(androidHome: string): Promise<void> {
+async function ensureEmulatorInstalled(
+  androidHome: string,
+  javaHome?: string
+): Promise<void> {
   const { sdkm } = getSdkTools(androidHome);
   if (!sdkm)
     throw new Error(
@@ -494,14 +518,14 @@ async function ensureEmulatorInstalled(androidHome: string): Promise<void> {
       "$ErrorActionPreference = 'Stop'",
       `$sdk  = ${psq(sdkm)}`,
       `$root = ${psq(androidHome)}`,
+      `$env:ANDROID_HOME = ${psq(androidHome)}`,
+      `$env:ANDROID_SDK_ROOT = ${psq(androidHome)}`,
+      "if ($env:JAVA_HOME -and (Test-Path ($env:JAVA_HOME + '\\bin'))) { $env:PATH = ($env:JAVA_HOME + '\\bin;' + $env:PATH) }",
       "try { Unblock-File -Path $sdk } catch {}",
       `& $sdk --sdk_root=$root "emulator" "platform-tools" | Out-Host`,
     ].join("\r\n");
     await runPSScript(ps, {
-      env: mergedEnv({
-        ANDROID_HOME: androidHome,
-        ANDROID_SDK_ROOT: androidHome,
-      }),
+      env: runtimeEnv({ androidHome, javaHome }),
     });
   } else {
     await run(sdkm, [
@@ -512,7 +536,11 @@ async function ensureEmulatorInstalled(androidHome: string): Promise<void> {
   }
 }
 
-async function installPlatformTools(androidHome: string, api: string) {
+async function installPlatformTools(
+  androidHome: string,
+  api: string,
+  javaHome?: string
+) {
   const { sdkm } = getSdkTools(androidHome);
   if (!sdkm) throw new Error("sdkmanager not found after installation.");
 
@@ -535,6 +563,9 @@ async function installPlatformTools(androidHome: string, api: string) {
         "$ErrorActionPreference = 'Stop'",
         `$sdk  = ${psq(sdkm)}`,
         `$root = ${psq(androidHome)}`,
+        `$env:ANDROID_HOME = ${psq(androidHome)}`,
+        `$env:ANDROID_SDK_ROOT = ${psq(androidHome)}`,
+        "if ($env:JAVA_HOME -and (Test-Path ($env:JAVA_HOME + '\\bin'))) { $env:PATH = ($env:JAVA_HOME + '\\bin;' + $env:PATH) }",
         'if (!(Test-Path $sdk)) { throw "sdkmanager not found: $sdk" }',
         "try { Unblock-File -Path $sdk } catch {}",
         `& $sdk --sdk_root=$root ${pkgs
@@ -550,19 +581,13 @@ async function installPlatformTools(androidHome: string, api: string) {
         systemImagePath,
       ]),
       {
-        env: mergedEnv({
-          ANDROID_HOME: androidHome,
-          ANDROID_SDK_ROOT: androidHome,
-        }),
+        env: runtimeEnv({ androidHome, javaHome }),
       }
     );
 
     try {
       await runPSScript(psInstall(["extras;google;gdk"]), {
-        env: mergedEnv({
-          ANDROID_HOME: androidHome,
-          ANDROID_SDK_ROOT: androidHome,
-        }),
+        env: runtimeEnv({ androidHome, javaHome }),
       });
     } catch {
       /* ignore */
@@ -571,10 +596,7 @@ async function installPlatformTools(androidHome: string, api: string) {
       await runPSScript(
         psInstall(["extras;intel;Hardware_Accelerated_Execution_Manager"]),
         {
-          env: mergedEnv({
-            ANDROID_HOME: androidHome,
-            ANDROID_SDK_ROOT: androidHome,
-          }),
+          env: runtimeEnv({ androidHome, javaHome }),
         }
       );
     } catch {
@@ -683,13 +705,17 @@ async function createAvd(
 /* ────────────────────────────────────────────────
    Emulator Launcher (auto-install if missing)
 ──────────────────────────────────────────────── */
-async function launchEmulator(androidHome: string, avdName: string) {
+async function launchEmulator(
+  androidHome: string,
+  avdName: string,
+  javaHome?: string
+) {
   console.log(`🚀 Launching emulator: ${avdName}...`);
   let { emulatorCmd } = getSdkTools(androidHome);
 
   if (!emulatorCmd) {
     console.log("ℹ️ Emulator binary not found. Installing emulator package...");
-    await ensureEmulatorInstalled(androidHome);
+    await ensureEmulatorInstalled(androidHome, javaHome);
     ({ emulatorCmd } = getSdkTools(androidHome));
   }
   if (!emulatorCmd) {
@@ -702,7 +728,7 @@ async function launchEmulator(androidHome: string, avdName: string) {
       `$emu = ${psq(emulatorCmd)}`,
       "try { Unblock-File -Path $emu } catch {}",
     ].join("\r\n");
-    await runPSScript(ps);
+    await runPSScript(ps, { env: runtimeEnv({ androidHome, javaHome }) });
   }
 
   const baseArgs = ["-avd", avdName, "-netdelay", "none", "-netspeed", "full"];
@@ -714,6 +740,7 @@ async function launchEmulator(androidHome: string, avdName: string) {
     stdio: "inherit",
     detached: true,
     shell: true,
+    env: runtimeEnv({ androidHome, javaHome }),
   });
 
   proc.on("error", (err) => console.error("✖ Emulator failed:", err.message));
@@ -766,8 +793,11 @@ async function main() {
 
   if (isWindows) console.log(`ℹ️ Windows ${release()}`);
 
-  // 1) Java 필요(sdkmanager) — 반드시 await
-  await ensureJava17OrLater();
+  // 1) Java 필요(sdkmanager) — 반드시 await, javaHome 반환
+  const JAVA_HOME_RUNTIME = await ensureJava17OrLater();
+  if (JAVA_HOME_RUNTIME) {
+    console.log(`🔎 JAVA_HOME (runtime): ${JAVA_HOME_RUNTIME}`);
+  }
 
   // 2) ANDROID_HOME 결정
   const detected = detectAndroidStudioSdk();
@@ -783,10 +813,10 @@ async function main() {
   // 3) cmdline-tools 설치/정규화
   await ensureSdk(ANDROID_HOME);
 
-  // 4) sdkmanager 라이선스 동의
+  // 4) sdkmanager 라이선스 동의 (환경 명시 주입)
   const { sdkm } = getSdkTools(ANDROID_HOME);
   if (!sdkm) throw new Error("sdkmanager not found");
-  await acceptLicenses(ANDROID_HOME, sdkm);
+  await acceptLicenses(ANDROID_HOME, sdkm, JAVA_HOME_RUNTIME);
 
   // 5) 디바이스 선택 및 시스템 이미지 설치
   const { device } = await inquirer.prompt([
@@ -798,11 +828,15 @@ async function main() {
     },
   ]);
   const preset = DEVICE_PRESETS[device];
-  const { sysImg, abi } = await installPlatformTools(ANDROID_HOME, preset.api);
+  const { sysImg, abi } = await installPlatformTools(
+    ANDROID_HOME,
+    preset.api,
+    JAVA_HOME_RUNTIME
+  );
 
   // 6) AVD 생성 및 에뮬레이터 기동
   await createAvd(ANDROID_HOME, preset, sysImg, abi);
-  await launchEmulator(ANDROID_HOME, preset.name);
+  await launchEmulator(ANDROID_HOME, preset.name, JAVA_HOME_RUNTIME);
 
   console.log("\n✅ Setup complete and emulator launched!");
 
@@ -819,26 +853,41 @@ async function main() {
   if (!adb) throw new Error("adb not found after installation.");
 
   console.log("📱 Installing APK...");
-  await run(shQuote(adb), ["install", "-r", shQuote(apkPath)]);
+  await run(shQuote(adb), ["install", "-r", shQuote(apkPath)], {
+    env: runtimeEnv({ androidHome: ANDROID_HOME, javaHome: JAVA_HOME_RUNTIME }),
+  });
 
   console.log("\n🚀 Launching WebView app...");
-  await run(shQuote(adb), [
-    "shell",
-    "am",
-    "start",
-    "-n",
-    "com.ebview.android/.MainActivity",
-  ]);
+  await run(
+    shQuote(adb),
+    ["shell", "am", "start", "-n", "com.ebview.android/.MainActivity"],
+    {
+      env: runtimeEnv({
+        androidHome: ANDROID_HOME,
+        javaHome: JAVA_HOME_RUNTIME,
+      }),
+    }
+  );
 
   // 9) Chrome DevTools 세팅
   console.log("\n🌐 Setting up Chrome remote debugging...");
   try {
-    await run(shQuote(adb), [
-      "forward",
-      "tcp:9222",
-      "localabstract:chrome_devtools_remote",
-    ]);
-    await run(shQuote(adb), ["reverse", "tcp:5173", "tcp:5173"]);
+    await run(
+      shQuote(adb),
+      ["forward", "tcp:9222", "localabstract:chrome_devtools_remote"],
+      {
+        env: runtimeEnv({
+          androidHome: ANDROID_HOME,
+          javaHome: JAVA_HOME_RUNTIME,
+        }),
+      }
+    );
+    await run(shQuote(adb), ["reverse", "tcp:5173", "tcp:5173"], {
+      env: runtimeEnv({
+        androidHome: ANDROID_HOME,
+        javaHome: JAVA_HOME_RUNTIME,
+      }),
+    });
 
     console.log("🧭 Opening Chrome debugger...");
     if (isWindows) {
