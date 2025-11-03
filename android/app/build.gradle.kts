@@ -1,5 +1,16 @@
 import org.gradle.api.JavaVersion
 
+tasks.whenTaskAdded {
+    if (name == "preBuild") {
+        doFirst {
+            val metaFiles = fileTree("src/main/res") {
+                include("**/._*")
+            }
+            metaFiles.forEach { it.delete() }
+        }
+    }
+}
+
 plugins {
     id("com.android.application")
     kotlin("android")
