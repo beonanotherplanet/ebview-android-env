@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <!-- WebView -->
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- 에러 레이아웃 -->
+    <LinearLayout
+        android:id="@+id/errorLayout"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F5F5F5"
+        android:visibility="gone"
+        android:padding="32dp">
+
+        <TextView
+            android:id="@+id/errorText"
+            android:text="🚫 WebView unavailable\n서버에 연결할 수 없습니다."
+            android:textColor="#444444"
+            android:textSize="16sp"
+            android:gravity="center"
+            android:paddingBottom="20dp" />
+
+        <Button
+            android:id="@+id/retryButton"
+            android:text="다시 시도하기"
+            android:textAllCaps="false"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#4285F4"
+            android:padding="12dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:layout_gravity="center"
+            android:background="@drawable/rounded_button" />
+    </LinearLayout>
+</FrameLayout>

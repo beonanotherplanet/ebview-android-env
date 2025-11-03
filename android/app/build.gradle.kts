@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.ebview.android"
+    namespace = "com.webview.android"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.ebview.android"
+        applicationId = "com.webview.android"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -43,6 +43,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        viewBinding = true
     }
 
     packaging {

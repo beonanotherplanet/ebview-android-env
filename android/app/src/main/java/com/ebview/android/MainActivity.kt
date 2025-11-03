@@ -1,79 +1,103 @@
-package com.ebview.android
+package com.webview.android
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Bundle
-import android.webkit.WebChromeClient
+import android.view.View
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.activity.ComponentActivity
-import androidx.activity.addCallback
-import androidx.core.view.WindowCompat
+import androidx.appcompat.app.AppCompatActivity
+import com.webview.android.databinding.ActivityMainBinding
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 
-class MainActivity : ComponentActivity() {
-    private lateinit var webView: WebView
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+    private var isWebViewErrorState = false
+    private val targetUrl = "http://10.0.2.2:5173"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-        // ✅ WebView 디버깅 허용 (Vite HMR, console.log, 네트워크 확인 가능)
-        WebView.setWebContentsDebuggingEnabled(true)
+        val webView = binding.webView
 
-        webView = WebView(this)
-        setContentView(webView)
-
-        val settings = webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            cacheMode = WebSettings.LOAD_NO_CACHE
-            allowFileAccess = false
-            allowContentAccess = false
-            mediaPlaybackRequiresUserGesture = false
-        }
-
-        // ✅ WebViewClient 설정 (외부 링크 방지)
+        // WebView 설정
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
         webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                return false
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError
+            ) {
+                showErrorPage()
             }
-        }
 
-        // ✅ 콘솔 / alert 등 JS 관련 동작을 위한 ChromeClient
-        webView.webChromeClient = WebChromeClient()
-
-        // ✅ Vite Dev Server 주소 설정
-        //    - macOS / Windows 공통 (에뮬레이터는 localhost 대신 10.0.2.2 사용)
-        val targetUrl = BuildConfig.VITE_DEV_SERVER_URL.ifEmpty {
-            "http://10.0.2.2:5173"
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                isWebViewErrorState = false
+            }
         }
 
         webView.loadUrl(targetUrl)
 
-        // ✅ 뒤로가기 시 WebView History 우선
-        onBackPressedDispatcher.addCallback(this) {
-            if (webView.canGoBack()) {
-                webView.goBack()
-            } else {
-                finish()
-            }
+        binding.retryButton.setOnClickListener {
+            reloadWebView()
         }
+
+        registerNetworkCallback()
     }
 
-    override fun onResume() {
-        super.onResume()
-        webView.onResume()
+    /** ✨ 부드러운 fade 애니메이션 */
+    private fun fadeSwitch(from: View, to: View) {
+        val fadeOut = ObjectAnimator.ofFloat(from, "alpha", 1f, 0f)
+        fadeOut.duration = 250
+        fadeOut.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: android.animation.Animator) {
+                from.visibility = View.GONE
+                to.visibility = View.VISIBLE
+                val fadeIn = ObjectAnimator.ofFloat(to, "alpha", 0f, 1f)
+                fadeIn.duration = 250
+                fadeIn.start()
+            }
+        })
+        fadeOut.start()
     }
 
-    override fun onPause() {
-        webView.onPause()
-        super.onPause()
+    private fun showErrorPage() {
+        if (isWebViewErrorState) return
+        isWebViewErrorState = true
+        fadeSwitch(binding.webView, binding.errorLayout)
+    }
+
+    private fun reloadWebView() {
+        fadeSwitch(binding.errorLayout, binding.webView)
+        binding.webView.reload()
+    }
+
+    private fun registerNetworkCallback() {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java)
+        connectivityManager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (isWebViewErrorState) {
+                    runOnUiThread {
+                        reloadWebView()
+                    }
+                }
+            }
+        })
     }
 
     override fun onDestroy() {
-        webView.destroy()
         super.onDestroy()
+        binding.webView.destroy()
     }
 }
