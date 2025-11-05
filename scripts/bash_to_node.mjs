@@ -16,6 +16,20 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+function sdkYes(args: string[]) {
+  const cmdline = `set "JAVA_HOME=" & "${SDKMANAGER_BAT}" ${args.join(" ")}`;
+  const child = spawn("cmd.exe", ["/d", "/s", "/c", cmdline], {
+    windowsHide: true,
+    shell: false,
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+  child.stdin.write("y\n".repeat(100));
+  child.stdin.end();
+  return new Promise<void>((res, rej) => {
+    child.on("exit", c => c === 0 ? res() : rej(new Error(`sdkmanager exited ${c}`)));
+    child.on("error", rej);
+  });
+}
 
 
 import path from "node:path";
