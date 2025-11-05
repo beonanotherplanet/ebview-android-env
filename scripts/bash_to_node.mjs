@@ -36,6 +36,82 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+// 따옴표 없이, 끝 슬래시 없이
+const AVDMANAGER_BAT = path.win32.normalize(
+  path.win32.join(process.env.LOCALAPPDATA!, "Android", "Sdk", "cmdline-tools", "latest", "bin", "avdmanager.bat")
+).replace(/[\\\/]+$/, "");
+
+function runAvdNoJava(args: string[], { answerNoToPrompt = false } = {}) {
+  if (!fs.existsSync(AVDMANAGER_BAT)) {
+    throw new Error(`avdmanager.bat 없음: ${AVDMANAGER_BAT}`);
+  }
+
+  const env = { ...process.env };
+  delete env.JAVA_HOME;
+  delete env.JAVA_TOOL_OPTIONS;
+  delete env._JAVA_OPTIONS;
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", AVDMANAGER_BAT, ...args], {
+      env,
+      windowsHide: true,
+      shell: false,
+      stdio: ["pipe", "inherit", "inherit"],
+    });
+
+    if (answerNoToPrompt) {
+      // "Create custom hardware profile? [no]" 자동 응답
+      child.stdin.write("no\n");
+    }
+    child.stdin.end();
+
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`avdmanager exited ${code}`))));
+    child.on("error", reject);
+  });
+}
+
+async function createAVD(avdName, img, deviceKey) {
+  const avdList = execSync(`"${EMULATOR_BIN}" -list-avds`).toString();
+  const avdDir = path.join(os.homedir(), ".android", "avd", `${avdName}.avd`);
+  const configIni = path.join(avdDir, "config.ini");
+
+  if (!avdList.includes(avdName)) {
+    info(`AVD 생성 중... (${avdName})`);
+    // ✅ JAVA_* 제거된 환경으로 avdmanager 실행
+    await runAvdNoJava(
+      ["create", "avd", "-n", avdName, "-k", img, "--device", "pixel", "--force"],
+      { answerNoToPrompt: true }
+    );
+    // config.ini 생성 대기 (최대 30초 정도)
+    let tries = 150;
+    while (!fs.existsSync(configIni) && tries-- > 0) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!fs.existsSync(configIni)) {
+      throw new Error(`config.ini 생성 실패: ${configIni}`);
+    }
+    success(`${avdName} AVD 생성 완료.`);
+  } else {
+    info(`이미 ${avdName} AVD가 존재합니다.`);
+  }
+
+  // (네가 쓰는 내장 프로필 병합 로직이 있다면 여기서 그대로 수행)
+  // const profileIni = PROFILES[deviceKey]; ... mergeIni(...)
+}
+
+
+
+
+
+
+
+
+
 function spawnSdkmanagerWithYes(args: string[]) {
   // 1) sdkmanager.bat 절대경로(따옴표 없음, 끝 슬래시 제거)
   const bat = path.win32.normalize(
