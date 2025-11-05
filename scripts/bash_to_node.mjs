@@ -12,6 +12,62 @@ import path from "node:path";
 import readline from "node:readline";
 import os from "node:os";
 
+function waitForBoot() {
+  // 디바이스 감지
+  run(`"${ADB_BIN}" wait-for-device`);
+  // 부팅 완료 플래그 대기
+  let tries = 60;
+  while (tries-- > 0) {
+    try {
+      const out = execSync(`"${ADB_BIN}" shell getprop sys.boot_completed`, { stdio: ["ignore", "pipe", "ignore"] })
+        .toString()
+        .trim();
+      if (out === "1") return;
+    } catch {}
+    execSync('powershell -Command "Start-Sleep -Seconds 1"');
+  }
+  throw new Error("에뮬레이터 부팅 완료 신호(sys.boot_completed) 대기 시간 초과");
+}
+
+function startEmulator(avdName) {
+  ensureAdb();
+
+  info(`${avdName} 에뮬레이터 실행 중...`);
+
+  // 디버깅 쉽게: verbose, 스냅샷 비활성화, 가속 확인
+  const args = [
+    "-avd", avdName,
+    "-verbose",
+    "-no-snapshot",
+    "-accel", "on",          // WHPX/Hyper-V 상태를 명확히 로그로 보여줌
+    "-gpu", "auto",          // 먼저 auto로 시도 (문제 있으면 "off"로 다시)
+    "-netdelay", "none",
+    "-netspeed", "full",
+  ];
+
+  // 중요: shell:false + 인자에 쌍따옴표 넣지 말기
+  const child = spawn(EMULATOR_BIN, args, {
+    shell: false,
+    stdio: "inherit",        // 출력이 "현재 터미널"에 그대로 찍힘 → 팝업 안 뜸
+  });
+
+  child.on("exit", (code) => {
+    if (code !== 0) {
+      error(`emulator 종료 코드: ${code}`);
+    }
+  });
+
+  // 여기서 부팅 완료까지 대기 (에러면 throw)
+  try {
+    waitForBoot();
+    success("에뮬레이터 부팅 완료!");
+  } catch (e) {
+    error(String(e.message || e));
+    throw e;
+  }
+}
+
+
 
 function waitForFile(filePath, { timeoutMs = 30000, intervalMs = 200 } = {}) {
   return new Promise((resolve, reject) => {
