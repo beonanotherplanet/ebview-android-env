@@ -12,6 +12,65 @@ import path from "node:path";
 import readline from "node:readline";
 import os from "node:os";
 
+
+// ---------- config.ini 병합 유틸 ----------
+function parseIni(text: string) {
+  const map = new Map<string, string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const k = line.slice(0, eq).trim();
+    const v = line.slice(eq + 1).trim();
+    map.set(k, v);
+  }
+  return map;
+}
+
+function serializeIni(map: Map<string, string>) {
+  return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+}
+
+function mergeIni(baseText: string, patchText: string) {
+  const base = parseIni(baseText);
+  const patch = parseIni(patchText);
+  for (const [k, v] of patch.entries()) base.set(k, v); // 업서트
+  return serializeIni(base);
+}
+
+// ---------- AVD 생성 ----------
+function createAVD(avdName: string, img: string, deviceKey: "note20"|"s22"|"note10") {
+  const avdList = execSync(`"${EMULATOR_BIN}" -list-avds`).toString();
+  if (avdList.includes(avdName)) {
+    info(`이미 ${avdName} AVD가 존재합니다.`);
+  } else {
+    info(`AVD 생성 중... (${avdName})`);
+    run(`"${AVDMANAGER}" create avd -n "${avdName}" -k "${img}" --device "pixel"`);
+    success(`${avdName} AVD 생성 완료.`);
+  }
+
+  // config.ini 경로
+  const avdConfigPath = path.join(os.homedir(), ".android", "avd", `${avdName}.avd`, "config.ini");
+  if (!fs.existsSync(avdConfigPath)) {
+    throw new Error(`config.ini를 찾을 수 없습니다: ${avdConfigPath}`);
+  }
+
+  // 내장 프로필 적용
+  const profileIni = PROFILES[deviceKey];
+  if (!profileIni) {
+    warn(`'${deviceKey}' 프로필이 없어 config.ini를 수정하지 않았습니다.`);
+    return;
+  }
+
+  const current = fs.readFileSync(avdConfigPath, "utf-8");
+  const merged = mergeIni(current, profileIni);
+  fs.writeFileSync(avdConfigPath, merged, "utf-8");
+  success(`하드웨어 프로필 적용 완료: ${avdName}`);
+}
+
+
+
 // ---------- 터미널 색상 ----------
 const colors = {
   reset: "\x1b[0m",
