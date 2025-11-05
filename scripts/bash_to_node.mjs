@@ -65,6 +65,47 @@ function run(cmd, opts = {}) {
   }
 }
 
+
+function ensureJavaEnv(baseEnv: NodeJS.ProcessEnv = process.env) {
+  const env = { ...baseEnv };
+
+  // sanitize JAVA_HOME
+  let jh = (env.JAVA_HOME || "").trim();
+  if ((jh.startsWith('"') && jh.endsWith('"')) || (jh.startsWith("'") && jh.endsWith("'"))) {
+    jh = jh.slice(1, -1);
+  }
+  const javaExe = path.join(jh || "", "bin", process.platform === "win32" ? "java.exe" : "java");
+  const hasValidJH = jh && fs.existsSync(javaExe);
+
+  if (!hasValidJH) {
+    // JAVA_HOME이 비었거나 잘못됐으면 지워서 sdkmanager가 PATH의 java를 보게 하거나,
+    // 우리가 설치한 JDK(ensureJDK에서 설치)로 교체.
+    if (jh) delete env.JAVA_HOME;
+
+    // 우리가 설치한 경로 추정(ensureJDK가 설치한 위치)
+    const candidate = path.join(os.homedir(), "AndroidEnv");
+    if (fs.existsSync(candidate)) {
+      const dir = fs.readdirSync(candidate).find(d => d.toLowerCase().startsWith("jdk-"));
+      if (dir) {
+        const jdkDir = path.join(candidate, dir);
+        const jdkJava = path.join(jdkDir, "bin", process.platform === "win32" ? "java.exe" : "java");
+        if (fs.existsSync(jdkJava)) {
+          env.JAVA_HOME = jdkDir;
+        }
+      }
+    }
+  }
+
+  // 최종적으로 JAVA_HOME이 있다면 PATH 앞에 bin 추가
+  if (env.JAVA_HOME) {
+    const sep = process.platform === "win32" ? ";" : ":";
+    env.PATH = `${path.join(env.JAVA_HOME, "bin")}${sep}${env.PATH || ""}`;
+  }
+
+  return env;
+}
+
+
 // ---------- JDK 설치 ----------
 function ensureJDK() {
   try {
