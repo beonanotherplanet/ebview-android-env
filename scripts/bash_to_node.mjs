@@ -16,6 +16,65 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+function sanitizeJavaHomeForWin(raw?: string) {
+  if (!raw) return undefined;
+  let v = raw.trim();
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1);
+  }
+  // /c/... → C:\...  (Git Bash/MSYS 경로 교정)
+  if (/^\/[a-zA-Z]\//.test(v)) {
+    v = v.replace(/^\/([a-zA-Z])\//, (_, d) => `${d.toUpperCase()}:\\`).replace(/\//g, "\\");
+  }
+  // C:/... → C:\...
+  if (/^[a-zA-Z]:\//.test(v)) v = v.replace(/\//g, "\\");
+  return v.replace(/[\\\s]+$/, "");
+}
+
+function buildSdkEnv() {
+  const env = { ...process.env };
+  if (process.platform === "win32") {
+    const fixed = sanitizeJavaHomeForWin(env.JAVA_HOME);
+    if (fixed) {
+      env.JAVA_HOME = fixed;
+      env.PATH = `${path.join(fixed, "bin")};${env.PATH || ""}`;
+    } else {
+      // 깨진 JAVA_HOME이 있으면 오히려 제거해 sdkmanager가 PATH의 java를 보게 한다.
+      delete env.JAVA_HOME;
+    }
+  }
+  return env;
+}
+
+function runSdkmanager(args: string[]) {
+  const cmd = process.platform === "win32" ? SDKMANAGER : SDKMANAGER.replace(/\.bat$/, "");
+  return execSync(`"${cmd}" ${args.join(" ")}`, {
+    shell: true,
+    stdio: "inherit",
+    env: buildSdkEnv(),
+  });
+}
+
+// 파이프 대신 stdin으로 'y'를 주입해야 할 때(licenses용)
+function spawnSdkmanagerWithYes(args: string[]) {
+  const cmd = process.platform === "win32" ? SDKMANAGER : SDKMANAGER.replace(/\.bat$/, "");
+  const child = spawn(`"${cmd}"`, args, {
+    shell: true,
+    stdio: ["pipe", "inherit", "inherit"],
+    env: buildSdkEnv(),
+  });
+  child.stdin.write("y\n".repeat(100));
+  child.stdin.end();
+  return new Promise<void>((resolve, reject) => {
+    child.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`sdkmanager exited ${c}`))));
+    child.on("error", reject);
+  });
+}
+
+
+
+
+
 /** 콘솔 팝업 없이 조용히 실행 (stdout/stderr 숨김) */
 function runSilent(cmd: string, args: string[] = []) {
   const r = spawnSync(cmd, args, {
