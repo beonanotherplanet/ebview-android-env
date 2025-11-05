@@ -162,6 +162,31 @@ function ensureSDK() {
 }
 
 // ---------- SDK 컴포넌트 ----------
+
+function spawnWithYes(args: string[]) {
+  const child = spawn(`"${SDKMANAGER}"`, args, {
+    shell: true,
+    stdio: ["pipe", "inherit", "inherit"],
+    env: ensureJavaEnv(),
+  });
+  // 충분한 횟수로 'y' 입력
+  child.stdin.write("y\n".repeat(100));
+  child.stdin.end();
+  return new Promise<void>((resolve, reject) => {
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`sdkmanager exited ${code}`))));
+    child.on("error", reject);
+  });
+}
+
+async function installComponents() {
+  info("SDK 컴포넌트 설치 중...");
+  // 라이선스 동의
+  await spawnWithYes([`--sdk_root="${SDK_ROOT}"`, "--licenses"]);
+  // 컴포넌트 설치 (HTTPS 차단 환경이면 --no_https 유지)
+  run(`"${SDKMANAGER}" --no_https "platform-tools" "emulator"`);
+}
+
+
 function installComponents() {
   info("SDK 컴포넌트 설치 중...");
   run(`echo y | "${SDKMANAGER}" --sdk_root="${SDK_ROOT}" --licenses`);
