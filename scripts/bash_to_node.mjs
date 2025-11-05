@@ -32,6 +32,53 @@ function sdkYes(args: string[]) {
 }
 
 
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+function spawnSdkmanagerWithYes(args: string[]) {
+  // 1) sdkmanager.bat 절대경로(따옴표 없음, 끝 슬래시 제거)
+  const bat = path.win32.normalize(
+    path.win32.join(process.env.LOCALAPPDATA!, "Android", "Sdk", "cmdline-tools", "latest", "bin", "sdkmanager.bat")
+  ).replace(/[\\\/]+$/, "");
+
+  if (!fs.existsSync(bat)) {
+    throw new Error(`sdkmanager.bat 없음: ${bat}`);
+  }
+
+  // 2) 호출-전용 환경: JAVA_* 싹 지움 (배치의 엄격 검사 우회)
+  const env = { ...process.env };
+  delete env.JAVA_HOME;
+  delete env.JAVA_TOOL_OPTIONS;
+  delete env._JAVA_OPTIONS;
+
+  // (선택) 네가 보장된 JDK 경로가 있다면 아래 두 줄을 풀면 더 안전
+  // const jdk = path.join(process.env.USERPROFILE!, "AndroidEnv", fs.readdirSync(path.join(process.env.USERPROFILE!, "AndroidEnv")).find(d => d.toLowerCase().startsWith("jdk-"))!);
+  // env.PATH = `${path.win32.join(jdk, "bin")};${env.PATH || ""}`;
+
+  // 3) cmd.exe에서 실행 (공백/특수문자 안전), 콘솔 팝업 숨김
+  const cmd = `"${bat}" ${args.join(" ")}`;
+  const child = spawn("cmd.exe", ["/d", "/s", "/c", cmd], {
+    env,
+    windowsHide: true,
+    shell: false,
+    stdio: ["pipe", "inherit", "inherit"], // 로그 보고 싶지 않으면 "ignore"로 바꿔
+  });
+
+  child.stdin.write("y\n".repeat(100));
+  child.stdin.end();
+
+  return new Promise<void>((resolve, reject) => {
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`sdkmanager exited ${code}`))));
+    child.on("error", reject);
+  });
+}
+
+
+
+
+
+
 import path from "node:path";
 import fs from "node:fs";
 import { execSync, spawn } from "node:child_process";
