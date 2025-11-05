@@ -16,6 +16,42 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+
+// SDKMANAGER: 기존 변수 그대로 사용 (…\cmdline-tools\latest\bin\sdkmanager.bat)
+function runSdkmanager(args: string[]) {
+  const cmdline = `set "JAVA_HOME=" & "${SDKMANAGER}" ${args.join(" ")}`;
+  // cmd.exe 세션에서 JAVA_HOME을 '그 호출에 한해서' 비워 실행
+  execSync(`cmd.exe /d /s /c ${cmdline}`, {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      // PATH에 우리가 쓸 JDK bin을 앞에 두면 더 안전 (있다면)
+      ...(process.env.JAVA_HOME ? { PATH: `${path.join(process.env.JAVA_HOME, "bin")};${process.env.PATH || ""}` } : {}),
+    },
+  });
+}
+
+function spawnSdkmanagerWithYes(args: string[]) {
+  const cmdline = `set "JAVA_HOME=" & "${SDKMANAGER}" ${args.join(" ")}`;
+  const child = spawn("cmd.exe", ["/d", "/s", "/c", cmdline], {
+    stdio: ["pipe", "inherit", "inherit"],
+    env: {
+      ...process.env,
+      ...(process.env.JAVA_HOME ? { PATH: `${path.join(process.env.JAVA_HOME, "bin")};${process.env.PATH || ""}` } : {}),
+    },
+    windowsHide: true,
+    shell: false,
+  });
+  child.stdin.write("y\n".repeat(100));
+  child.stdin.end();
+  return new Promise<void>((resolve, reject) => {
+    child.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`sdkmanager exited ${c}`))));
+    child.on("error", reject);
+  });
+}
+
+
+
 function sanitizeJavaHomeForWin(raw?: string) {
   if (!raw) return undefined;
   let v = raw.trim();
