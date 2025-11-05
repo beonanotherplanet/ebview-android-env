@@ -12,6 +12,36 @@ import path from "node:path";
 import readline from "node:readline";
 import os from "node:os";
 
+function ensurePlatformToolsAndAdb() {
+  // SDK_ROOT/ADB_BIN 로그로 먼저 확인
+  info(`SDK_ROOT = ${SDK_ROOT}`);
+  info(`ADB_BIN  = ${ADB_BIN}`);
+
+  // 1) platform-tools 설치 (없으면)
+  if (!fs.existsSync(ADB_BIN)) {
+    warn("adb.exe가 없습니다. platform-tools를 설치합니다.");
+    // 사내망 환경이면 --no_https 유지
+    run(`"${SDKMANAGER}" --no_https "platform-tools"`);
+  }
+
+  // 2) 설치 후에도 없으면 SDK 경로 문제
+  if (!fs.existsSync(ADB_BIN)) {
+    throw new Error(
+      `adb.exe를 찾지 못했습니다.\n` +
+      `- 예상 경로: ${ADB_BIN}\n` +
+      `- SDK_ROOT가 올바른지 확인하세요. (LOCALAPPDATA=${process.env.LOCALAPPDATA})`
+    );
+  }
+
+  // 3) adb 서버 기동 (직접 실행; shell:false 권장)
+  const child = spawn(ADB_BIN, ["start-server"], { shell: false, stdio: "inherit" });
+  child.on("exit", (code) => {
+    if (code !== 0) error(`adb start-server 종료코드: ${code}`);
+  });
+}
+
+
+
 function waitForBoot() {
   // 디바이스 감지
   run(`"${ADB_BIN}" wait-for-device`);
