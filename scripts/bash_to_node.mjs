@@ -65,6 +65,56 @@ function run(cmd, opts = {}) {
   }
 }
 
+import path from "node:path";
+import fs from "node:fs";
+
+function toWindowsAbs(javaHomeRaw?: string) {
+  if (!javaHomeRaw) return undefined;
+  let v = javaHomeRaw.trim();
+
+  // 값에 들어간 따옴표 제거
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1);
+  }
+
+  // MSYS/Git Bash 경로 (/c/...) → C:\... 로 변환
+  if (/^\/[a-zA-Z]\//.test(v)) {
+    // /c/Program Files/Java/jdk-17 → C:\Program Files\Java\jdk-17
+    v = v.replace(/^\/([a-zA-Z])\//, (_, d) => `${d.toUpperCase()}:\\`).replace(/\//g, "\\");
+  }
+
+  // C:/ 형식 → C:\ 로
+  if (/^[a-zA-Z]:\//.test(v)) {
+    v = v.replace(/\//g, "\\");
+  }
+
+  // 끝 역슬래시/공백 제거
+  v = v.replace(/[\\\s]+$/, "");
+
+  // 최종 확인: %JAVA_HOME%\bin\java.exe가 있어야 함
+  const javaExe = path.join(v, "bin", "java.exe");
+  if (!fs.existsSync(javaExe)) return undefined;
+
+  return v;
+}
+
+function ensureWindowsJavaEnv(envIn: NodeJS.ProcessEnv = process.env) {
+  const env = { ...envIn };
+  const fixed = toWindowsAbs(env.JAVA_HOME);
+  if (fixed) {
+    env.JAVA_HOME = fixed;
+  } else {
+    // JAVA_HOME이 POSIX 스타일이었거나 깨져 있으면 지우고 PATH의 java를 쓰게 하거나,
+    // 너가 설치한 JDK 경로로 교체 (예: C:\Users\you\AndroidEnv\jdk-17.*)
+    delete env.JAVA_HOME;
+  }
+  if (env.JAVA_HOME) {
+    env.PATH = `${path.join(env.JAVA_HOME, "bin")};${env.PATH || ""}`;
+  }
+  return env;
+}
+
+
 
 function ensureJavaEnv(baseEnv: NodeJS.ProcessEnv = process.env) {
   const env = { ...baseEnv };
