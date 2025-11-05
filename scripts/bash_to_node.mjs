@@ -17,6 +17,59 @@ import fs from "node:fs";
 import path from "node:path";
 
 
+
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+// 기존 SDKMANAGER 상수를 그대로 사용한다고 가정
+//  ex) const SDKMANAGER = path.join(SDK_ROOT, "cmdline-tools/latest/bin/sdkmanager.bat");
+
+function spawnSdkmanagerWithYes(args: string[]) {
+  const isWin = process.platform === "win32";
+
+  // 1) 실행 파일 경로 결정 (+ Windows 경로 정상화)
+  const toolPath = isWin
+    ? path.win32.normalize(SDKMANAGER)                  // sdkmanager.bat
+    : SDKMANAGER.replace(/\.bat$/i, "");               // 리눅스/맥: 확장자 없는 실행파일
+
+  if (!fs.existsSync(toolPath)) {
+    throw new Error(`sdkmanager 실행 파일을 찾지 못했습니다: ${toolPath}`);
+  }
+
+  if (isWin) {
+    // 2A) Windows: cmd.exe에서 실행 + 호출 단위로 JAVA_HOME 비우기(검사 우회)
+    //     공백 경로/인자 안전: /d /s /c + 따옴표
+    const cmdline = `set "JAVA_HOME=" & "${toolPath}" ${args.join(" ")}`;
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", cmdline], {
+      stdio: ["pipe", "inherit", "inherit"],
+      shell: false,
+      windowsHide: true,            // 검은 콘솔창 숨김
+      env: { ...process.env },      // (원하면 PATH 앞에 JDK bin 주입 가능)
+    });
+    child.stdin.write("y\n".repeat(100));
+    child.stdin.end();
+    return new Promise<void>((resolve, reject) => {
+      child.on("exit", c => c === 0 ? resolve() : reject(new Error(`sdkmanager exited ${c}`)));
+      child.on("error", reject);
+    });
+  } else {
+    // 2B) macOS/Linux: 직접 실행
+    const child = spawn(toolPath, args, {
+      stdio: ["pipe", "inherit", "inherit"],
+      shell: false,
+    });
+    child.stdin.write("y\n".repeat(100));
+    child.stdin.end();
+    return new Promise<void>((resolve, reject) => {
+      child.on("exit", c => c === 0 ? resolve() : reject(new Error(`sdkmanager exited ${c}`)));
+      child.on("error", reject);
+    });
+  }
+}
+
+
+
 // SDKMANAGER: 기존 변수 그대로 사용 (…\cmdline-tools\latest\bin\sdkmanager.bat)
 function runSdkmanager(args: string[]) {
   const cmdline = `set "JAVA_HOME=" & "${SDKMANAGER}" ${args.join(" ")}`;
