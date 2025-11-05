@@ -18,6 +18,24 @@ import path from "node:path";
 
 
 
+import path from "node:path";
+import fs from "node:fs";
+import { execSync, spawn } from "node:child_process";
+
+const SDKMANAGER_BAT = path.win32.normalize(
+  path.win32.join(process.env.LOCALAPPDATA!, "Android", "Sdk", "cmdline-tools", "latest", "bin", "sdkmanager.bat")
+);
+if (!fs.existsSync(SDKMANAGER_BAT)) {
+  throw new Error(`sdkmanager.bat 없음: ${SDKMANAGER_BAT}`);
+}
+
+function sdk(args: string[]) {
+  const cmdline = `set "JAVA_HOME=" & "${SDKMANAGER_BAT}" ${args.join(" ")}`;
+  execSync(`cmd.exe /d /s /c ${cmdline}`, { stdio: "inherit", windowsHide: true });
+}
+
+
+
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
