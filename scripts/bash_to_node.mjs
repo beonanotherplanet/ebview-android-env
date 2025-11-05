@@ -13,6 +13,91 @@ import readline from "node:readline";
 import os from "node:os";
 
 
+function waitForFile(filePath, { timeoutMs = 30000, intervalMs = 200 } = {}) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const iv = setInterval(() => {
+      if (fs.existsSync(filePath)) {
+        clearInterval(iv);
+        return resolve(true);
+      }
+      if (Date.now() - start > timeoutMs) {
+        clearInterval(iv);
+        return reject(new Error(`Timeout waiting for: ${filePath}`));
+      }
+    }, intervalMs);
+  });
+}
+
+function createAVD(avdName, img, deviceKey /* "note20" | "s22" | "note10" */) {
+  const avdList = execSync(`"${EMULATOR_BIN}" -list-avds`).toString();
+  const avdDir = path.join(os.homedir(), ".android", "avd", `${avdName}.avd`);
+  const configIni = path.join(avdDir, "config.ini");
+
+  if (!avdList.includes(avdName)) {
+    info(`AVD 생성 중... (${avdName})`);
+    // avdmanager가 "Do you wish to create a custom hardware profile [no]" 물어보는 걸 대비해서 'no'를 넣는다.
+    const child = spawn(`"${AVDMANAGER}"`, [
+      "create", "avd",
+      "-n", avdName,
+      "-k", img,
+      "--device", "pixel",
+      // 필요시: "--force"  // 동일 이름이 있을 때 덮어쓰고 싶으면 주석 해제
+    ], {
+      shell: true,
+      stdio: ["pipe", "inherit", "inherit"],
+      env: process.env,
+    });
+    child.stdin.write("no\n");
+    child.stdin.end();
+
+    // 동기화: 생성 완료/실패 확인
+    const exitCode = execSyncWait(child);
+    if (exitCode !== 0) {
+      throw new Error(`avdmanager create avd failed with code ${exitCode}`);
+    }
+    success(`${avdName} AVD 생성 명령 완료. 파일 생성 대기...`);
+  } else {
+    info(`이미 ${avdName} AVD가 존재합니다. 설정만 업데이트합니다.`);
+  }
+
+  // 여기서 실제 파일이 생길 때까지 기다림
+  return waitForFile(configIni, { timeoutMs: 30000 })
+    .then(() => {
+      // 내장 프로필을 병합 적용
+      const profileIni = PROFILES[deviceKey];
+      if (profileIni) {
+        const current = fs.readFileSync(configIni, "utf-8");
+        const merged = mergeIni(current, profileIni);
+        fs.writeFileSync(configIni, merged, "utf-8");
+        success(`하드웨어 프로필 적용 완료: ${avdName}`);
+      } else {
+        warn(`'${deviceKey}' 프로필이 없어 config.ini를 수정하지 않았습니다.`);
+      }
+    })
+    .catch((e) => {
+      // 아직 폴더 자체가 없다면 생성 자체가 실패했을 가능성이 큼 → 원인 로그
+      throw new Error(
+        `config.ini를 찾을 수 없습니다: ${configIni}\n` +
+        `- 시스템 이미지가 설치되었는지 확인: ${img}\n` +
+        `- ANDROID SDK 권한/경로, 사용자 홈 디렉터리 접근 권한 확인\n` +
+        `원본 에러: ${e.message}`
+      );
+    });
+}
+
+// child process 종료 코드를 동기처럼 기다리기
+function execSyncWait(child) {
+  return require("deasync").loopWhile(() => {
+    let done = false;
+    child.on("exit", (code) => { child._exitCode = code; done = true; });
+    child.on("error", () => { done = true; });
+    return !done;
+  }) || child._exitCode || 0;
+}
+
+
+
 // ---------- config.ini 병합 유틸 ----------
 function parseIni(text: string) {
   const map = new Map<string, string>();
