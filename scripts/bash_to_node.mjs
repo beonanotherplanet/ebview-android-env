@@ -6,6 +6,46 @@
  * - AVD 생성 및 실행
  */
 
+function runAvdNoJava(args: string[], { answerNoToPrompt = false, timeoutMs = 20000 } = {}) {
+  if (!fs.existsSync(AVDMANAGER_BAT)) throw new Error(`avdmanager.bat 없음: ${AVDMANAGER_BAT}`);
+
+  const env = { ...process.env };
+  delete env.JAVA_HOME; delete env.JAVA_TOOL_OPTIONS; delete env._JAVA_OPTIONS;
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", AVDMANAGER_BAT, ...args], {
+      env, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let done = false;
+    const finish = (ok: boolean, err?: any) => {
+      if (done) return; done = true; clearTimeout(timer);
+      ok ? resolve() : reject(err || new Error("avdmanager failed"));
+    };
+
+    // 프롬프트 대응: CRLF로 'no' 입력 + 여분 개행
+    if (answerNoToPrompt) {
+      child.stdin.write("no\r\n");
+      setTimeout(() => { try { child.stdin.write("\r\n"); } catch {} }, 300);
+      setTimeout(() => { try { child.stdin.end(); } catch {} }, 600);
+    } else {
+      try { child.stdin.end(); } catch {}
+    }
+
+    // 타임아웃 시도(행걸림 회피)
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      finish(false, new Error("avdmanager timeout; killed"));
+    }, timeoutMs);
+
+    child.on("exit", code => finish(code === 0));
+    child.on("error", err => finish(false, err));
+  });
+}
+
+
+
+
 import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
