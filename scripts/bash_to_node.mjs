@@ -12,6 +12,112 @@ import path from "node:path";
 import readline from "node:readline";
 import os from "node:os";
 
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+/** 콘솔 팝업 없이 조용히 실행 (stdout/stderr 숨김) */
+function runSilent(cmd: string, args: string[] = []) {
+  const r = spawnSync(cmd, args, {
+    windowsHide: true,
+    shell: false,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  if (r.status && r.status !== 0) {
+    throw new Error(`${cmd} exited ${r.status}`);
+  }
+}
+
+/** 조용히 출력만 받아오기 (콘솔에 안 찍힘) */
+function outSilent(cmd: string, args: string[] = []) {
+  const r = execFileSync(cmd, args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  return r.toString().trim();
+}
+
+function pickEmulatorSerial(ADB_BIN: string) {
+  const lines = outSilent(ADB_BIN, ["devices"])
+    .split(/\r?\n/)
+    .slice(1)
+    .map(l => l.trim().split(/\s+/))
+    .filter(([id, st]) => id && id.startsWith("emulator-") && st === "device");
+  if (lines.length === 0) throw new Error("실행 중인 에뮬레이터를 찾지 못했습니다.");
+  return lines[0][0];
+}
+
+function installApkQuiet(ADB_BIN: string, serial: string, apkPath: string) {
+  const apk = path.resolve(apkPath);
+  if (!fs.existsSync(apk)) throw new Error(`APK 파일을 찾을 수 없습니다: ${apk}`);
+
+  runSilent(ADB_BIN, ["-s", serial, "install", "-r", "-g", apk]);
+}
+
+
+function listUserPackages(ADB_BIN: string, serial: string): Set<string> {
+  const raw = outSilent(ADB_BIN, ["-s", serial, "shell", "pm", "list", "packages", "-3"]);
+  const set = new Set<string>();
+  for (const line of raw.split(/\r?\n/)) {
+    const m = line.match(/^package:([a-zA-Z0-9._]+)/);
+    if (m) set.add(m[1]);
+  }
+  return set;
+}
+
+function findAapt(SDK_ROOT?: string) {
+  const candidates: string[] = [];
+  if (SDK_ROOT) {
+    const bt = path.join(SDK_ROOT, "build-tools");
+    if (fs.existsSync(bt)) {
+      for (const v of fs.readdirSync(bt)) {
+        const p = path.join(bt, v, process.platform === "win32" ? "aapt.exe" : "aapt");
+        if (fs.existsSync(p)) candidates.push(p);
+      }
+    }
+  }
+  // 최신 버전 우선
+  return candidates.sort().reverse()[0];
+}
+
+function extractPkgWithAapt(aaptPath: string, apkPath: string): string | undefined {
+  try {
+    const txt = outSilent(aaptPath, ["dump", "badging", apkPath]);
+    const m = txt.match(/package: name='([^']+)'/);
+    return m?.[1];
+  } catch { return undefined; }
+}
+
+function launchApp(ADB_BIN: string, serial: string, pkg: string) {
+  // 런처 인텐트로 실행 (조용히 실행)
+  runSilent(ADB_BIN, ["-s", serial, "shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"]);
+}
+
+/** 설치→패키지 감지→실행 전체 */
+function installAndLaunchQuiet(ADB_BIN: string, SDK_ROOT: string | undefined, serial: string, apkPath: string) {
+  // 설치 전/후 비교로 신규 패키지 추적
+  const before = listUserPackages(ADB_BIN, serial);
+  installApkQuiet(ADB_BIN, serial, apkPath);
+  const after = listUserPackages(ADB_BIN, serial);
+
+  let newly: string[] = [...after].filter(p => !before.has(p));
+
+  // 재설치라면 diff가 없을 수 있으니 aapt로 보조 추출
+  if (newly.length === 0) {
+    const aapt = findAapt(SDK_ROOT);
+    if (aapt) {
+      const pkg = extractPkgWithAapt(aapt, path.resolve(apkPath));
+      if (pkg) newly = [pkg];
+    }
+  }
+
+  if (newly.length > 0) {
+    launchApp(ADB_BIN, serial, newly[0]);
+  } else {
+    // 패키지명을 못 찾았을 때는 조용히 넘어가거나, 필요하다면 하드코딩 패키지로 실행
+    // launchApp(ADB_BIN, serial, "com.your.app"); // 필요 시 해제
+  }
+}
+
+
+
 // 실행 중인 첫 번째 에뮬레이터 시리얼 찾기 (emulator-5554 등)
 function pickEmulatorSerial() {
   const out = execSync(`"${ADB_BIN}" devices`, { stdio: ["ignore","pipe","ignore"] })
