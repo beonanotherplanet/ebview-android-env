@@ -12,6 +12,30 @@ import path from "node:path";
 import readline from "node:readline";
 import os from "node:os";
 
+// 실행 중인 첫 번째 에뮬레이터 시리얼 찾기 (emulator-5554 등)
+function pickEmulatorSerial() {
+  const out = execSync(`"${ADB_BIN}" devices`, { stdio: ["ignore","pipe","ignore"] })
+    .toString()
+    .split(/\r?\n/)
+    .slice(1)
+    .map(l => l.trim().split(/\s+/))
+    .filter(([id, st]) => id && id.startsWith("emulator-") && st === "device");
+  if (out.length === 0) throw new Error("실행 중인 에뮬레이터를 찾지 못했습니다 (adb devices 결과 비어있음).");
+  return out[0][0];
+}
+
+// APK 설치 (재설치 -r, 권한 자동 승인 -g, 필요시 다운그레이드 -d 옵션 추가 가능)
+function installApkOn(serial: string, apkPath: string) {
+  const apk = path.resolve(apkPath);
+  if (!fs.existsSync(apk)) throw new Error(`APK 파일을 찾을 수 없습니다: ${apk}`);
+  info(`APK 설치 중: ${apk} → ${serial}`);
+  execSync(`"${ADB_BIN}" -s ${serial} install -r -g "${apk}"`, { stdio: "inherit" });
+  success("APK 설치 완료");
+}
+
+
+
+
 function ensurePlatformToolsAndAdb() {
   // SDK_ROOT/ADB_BIN 로그로 먼저 확인
   info(`SDK_ROOT = ${SDK_ROOT}`);
