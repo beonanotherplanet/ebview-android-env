@@ -6,6 +6,54 @@
  * - AVD 생성 및 실행
  */
 
+// 필요: const { execFileSync } = require('node:child_process'); const http = require('node:http');
+
+// 사용 예: await fetchTargets({ port: 9222, adb: ADB, serial, requireSocket: `webview_devtools_remote_${pid}` })
+function fetchTargets({ port = 9222, adb = (process.platform === 'win32' ? 'adb.exe' : 'adb'), serial, requireSocket } = {}) {
+  // 0) adb forward 상태 확인: 이 시리얼에 tcp:<port>가 매핑돼 있는가 (+선택: 특정 소켓인지)
+  if (serial) {
+    try {
+      const list = execFileSync(adb, ['-s', serial, 'forward', '--list'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+      const ok = list
+        .split(/\r?\n/)
+        .some(line =>
+          line.startsWith(`${serial}\t`) &&
+          line.includes(`tcp:${port}`) &&
+          (requireSocket ? line.includes(`localabstract:${requireSocket}`) : true)
+        );
+      if (!ok) return Promise.resolve([]); // 포워드 미존재 → 아직 준비 전으로 간주
+    } catch {
+      return Promise.resolve([]);          // adb 실패도 폴링 유지
+    }
+  }
+
+  // 1) /json → 비면 /json/list 폴백 (reject 대신 항상 resolve([]))
+  function getOnce(pathname) {
+    return new Promise(resolve => {
+      const req = http.get({ host: '127.0.0.1', port, path: pathname }, r => {
+        let b = ''; r.setEncoding('utf8');
+        r.on('data', c => b += c);
+        r.on('end', () => {
+          if (r.statusCode && r.statusCode >= 400) return resolve([]);
+          try {
+            const data = b.trim() ? JSON.parse(b) : [];
+            resolve(Array.isArray(data) ? data : []);
+          } catch { resolve([]); }
+        });
+      });
+      req.on('error', () => resolve([]));
+      req.setTimeout(1500, () => { try { req.destroy(); } catch {}; resolve([]); });
+    });
+  }
+
+  return getOnce('/json').then(list => (list.length ? list : getOnce('/json/list')));
+}
+
+
+
+
+
+
 
 #!/usr/bin/env node
 /**
