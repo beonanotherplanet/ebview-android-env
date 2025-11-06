@@ -19,31 +19,55 @@
         android:gravity="center"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#F5F5F5"
+        android:background="#FFFFFF"
         android:visibility="gone"
         android:padding="32dp">
 
         <TextView
+            android:id="@+id/errorTextEmoji"
+            android:text="🚫"
+            android:textColor="#EA002C"
+            android:textSize="80sp"
+            android:gravity="center"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingBottom="30dp" />
+
+        <TextView
+            android:id="@+id/errorTextTitle"
+            android:text="WebView unavailable"
+            android:textColor="#000000"
+            android:textStyle="bold"
+            android:textSize="24sp"
+            android:gravity="center"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingBottom="30dp" />
+
+        <TextView
             android:id="@+id/errorText"
-            android:text="🚫 WebView unavailable\n서버에 연결할 수 없습니다."
-            android:textColor="#444444"
+            android:text="개발 서버가 동작하는지 확인해주세요."
+            android:textColor="#000000"
             android:textSize="16sp"
             android:gravity="center"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingBottom="20dp" />
+            android:paddingBottom="30dp" />
 
         <Button
             android:id="@+id/retryButton"
-            android:text="다시 시도하기"
+            android:text="Refresh"
+            android:textStyle="bold"
             android:textAllCaps="false"
             android:textSize="16sp"
             android:textColor="#FFFFFF"
-            android:backgroundTint="#4285F4"
-            android:padding="12dp"
+            android:backgroundTint="#F47725"
+            android:padding="18dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="12dp"
             android:layout_gravity="center"
             android:background="@drawable/rounded_button" />
     </LinearLayout>

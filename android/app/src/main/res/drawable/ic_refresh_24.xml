@@ -1,0 +1,33 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+
+    <!-- 원형 순환 화살표 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="
+            M12,4
+            v-2
+            l-3,3
+            3,3
+            v-2
+            c3.31,0 6,2.69 6,6
+            c0,0.88 -0.18,1.71 -0.5,2.47
+            l1.46,1.46
+            C19.63,14.98 20,14.03 20,13
+            C20,8.58 16.42,5 12,5
+            Z
+
+            M6.5,7.53
+            L5.04,6.07
+            C4.37,7.02 4,7.97 4,9
+            c0,4.42 3.58,8 8,8
+            v2
+            l3,-3
+            -3,-3
+            v2
+            c-3.31,0 -6,-2.69 -6,-6
+            c0,-0.88 0.18,-1.71 0.5,-2.47
+            Z" />
+</vector>
