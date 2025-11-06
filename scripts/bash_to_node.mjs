@@ -6,6 +6,167 @@
  * - AVD 생성 및 실행
  */
 
+
+#!/usr/bin/env node
+/**
+ * open-webview-devtools.js (Windows 우선)
+ * - 실행 중인 에뮬레이터의 WebView DevTools를 자동으로 연다
+ * - 앱은 그대로 두고, PC의 Chrome DevTools만 새 창으로 띄움
+ */
+
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import http from "node:http";
+
+// ----- 설정 (필요시 수정) -----
+const FORWARD_PORT = 9222;                // PC에서 열릴 로컬 포트
+const PREFERRED_TITLE_KEYWORD = "";       // 특정 페이지 타이틀 키워드로 고르고 싶으면 값 넣기 (예: "Vite")
+// --------------------------------
+
+function findAdb() {
+  const cands = [
+    process.env.ANDROID_HOME && path.join(process.env.ANDROID_HOME, "platform-tools", "adb.exe"),
+    process.env.ANDROID_SDK_ROOT && path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb.exe"),
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe"),
+    "adb.exe",
+  ].filter(Boolean) as string[];
+  for (const p of cands) {
+    try { execFileSync(p, ["version"], { stdio: "ignore" }); return p; } catch {}
+  }
+  throw new Error("adb를 찾지 못했습니다. ANDROID_HOME/ANDROID_SDK_ROOT 또는 platform-tools 설치를 확인하세요.");
+}
+
+const ADB = findAdb();
+
+function pickEmulatorSerial(): string {
+  const out = execFileSync(ADB, ["devices"], { stdio: ["ignore","pipe","ignore"] }).toString();
+  const rows = out.split(/\r?\n/).slice(1).map(l => l.trim().split(/\s+/));
+  const emus = rows.filter(([id, st]) => id?.startsWith("emulator-") && (st === "device" || st === "offline"));
+  if (!emus.length) throw new Error("실행 중인 에뮬레이터가 없습니다 (adb devices).");
+  return emus[0][0]; // 첫 번째 에뮬레이터 사용
+}
+
+// /proc/net/unix에서 webview_devtools_remote 소켓명 찾기
+function findWebViewSocket(serial: string): string {
+  const txt = execFileSync(ADB, ["-s", serial, "shell", "cat", "/proc/net/unix"], { stdio: ["ignore","pipe","ignore"] })
+    .toString();
+  const lines = txt.split(/\r?\n/).filter(l => l.includes("webview_devtools_remote"));
+  if (!lines.length) throw new Error("webview_devtools_remote 소켓을 찾지 못했습니다. (앱 WebView 디버깅 활성/Foreground 상태인지 확인)");
+  // 가장 길거나(프로세스명이 붙는 최신 형태) 마지막 것을 선택
+  const names = lines.map(l => {
+    const m = l.match(/webview_devtools_remote\S*/);
+    return m ? m[0] : "";
+  }).filter(Boolean);
+  // 키워드 선호 (패키지/타이틀을 모르는 경우엔 의미 없음)
+  const preferred = names.find(n => n.toLowerCase().includes("webview_devtools_remote"));
+  return preferred || names[names.length - 1];
+}
+
+function forward(serial: string, socketName: string) {
+  // 기존 포워드 해제 후 재설정(충돌 방지)
+  try { execFileSync(ADB, ["-s", serial, "forward", "--remove", `tcp:${FORWARD_PORT}`], { stdio: "ignore" }); } catch {}
+  execFileSync(ADB, ["-s", serial, "forward", `tcp:${FORWARD_PORT}`, `localabstract:${socketName}`], { stdio: "ignore" });
+}
+
+// http://127.0.0.1:9222/json에서 대상 탭의 ws/id 얻기
+function fetchTargets(): Promise<any[]> {
+  return new Promise((res, rej) => {
+    http.get({ host: "127.0.0.1", port: FORWARD_PORT, path: "/json" }, (r) => {
+      let b = ""; r.setEncoding("utf8");
+      r.on("data", (c) => (b += c));
+      r.on("end", () => {
+        try { res(JSON.parse(b)); } catch (e) { rej(e); }
+      });
+    }).on("error", rej);
+  });
+}
+
+async function pickTarget() {
+  // 여러 번 재시도 (WebView가 늦게 올라올 수 있음)
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const list = await fetchTargets();
+      // type: 'page' 우선
+      let pages = list.filter((t: any) => t.type === "page");
+      if (PREFERRED_TITLE_KEYWORD) {
+        const hit = pages.find((t: any) => (t.title || "").toLowerCase().includes(PREFERRED_TITLE_KEYWORD.toLowerCase()));
+        if (hit) return hit;
+      }
+      if (pages[0]) return pages[0];
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error("DevTools 대상 페이지를 찾지 못했습니다. (빈 리스트)");
+}
+
+// Windows에서 Chrome 경로 찾기
+function findChromeWin(): string | null {
+  const cands = [
+    process.env["PROGRAMFILES"] && path.join(process.env["PROGRAMFILES"]!, "Google", "Chrome", "Application", "chrome.exe"),
+    process.env["PROGRAMFILES(X86)"] && path.join(process.env["PROGRAMFILES(X86)"]!, "Google", "Chrome", "Application", "chrome.exe"),
+    process.env["LOCALAPPDATA"] && path.join(process.env["LOCALAPPDATA"]!, "Google", "Chrome", "Application", "chrome.exe"),
+  ].filter(Boolean) as string[];
+  for (const p of cands) if (fs.existsSync(p)) return p;
+  return null;
+}
+
+function openInChrome(url: string) {
+  if (process.platform === "win32") {
+    const chrome = findChromeWin();
+    if (chrome) {
+      spawn(chrome, ["--new-window", url], { windowsHide: true, stdio: "ignore", shell: false });
+      return;
+    }
+    // Chrome 경로를 못 찾으면 기본 브라우저로 /json 페이지라도 열어준다
+    spawn("cmd.exe", ["/d", "/s", "/c", "start", "", `http://127.0.0.1:${FORWARD_PORT}`], {
+      windowsHide: true, stdio: "ignore", shell: false,
+    });
+  } else {
+    // macOS/Linux (참고용)
+    spawn("open", [url], { stdio: "ignore" }).on("error", () => {
+      spawn("xdg-open", [url], { stdio: "ignore" });
+    });
+  }
+}
+
+(async () => {
+  try {
+    // 1) 대상 에뮬레이터
+    const serial = pickEmulatorSerial();
+
+    // 2) WebView DevTools 소켓 이름 찾기
+    const socket = findWebViewSocket(serial);
+
+    // 3) 포워딩: tcp:9222 -> localabstract:webview_devtools_remote*
+    forward(serial, socket);
+
+    // 4) 대상 탭 선택
+    const target = await pickTarget();
+
+    // 5) DevTools 프론트엔드 URL 만들기
+    //    (Chrome 전용 스킴: devtools://devtools/bundled/inspector.html?ws=...)
+    const ws = target.webSocketDebuggerUrl || target.webSocketDebuggerUrl;
+    const devtoolsUrl =
+      ws && ws.startsWith("ws://")
+        ? `devtools://devtools/bundled/inspector.html?ws=${ws.replace(/^ws:\/\//, "")}`
+        : `http://127.0.0.1:${FORWARD_PORT}`; // 폴백: 리스트 페이지
+
+    // 6) Chrome으로 새 창 오픈 (팝업 콘솔 없이)
+    openInChrome(devtoolsUrl);
+    console.log("✅ WebView DevTools opened:", devtoolsUrl);
+  } catch (e: any) {
+    console.error("❌ 실패:", e?.message || e);
+    process.exit(1);
+  }
+})();
+
+
+
+
+
 function runAvdNoJava(args: string[], { answerNoToPrompt = false, timeoutMs = 20000 } = {}) {
   if (!fs.existsSync(AVDMANAGER_BAT)) throw new Error(`avdmanager.bat 없음: ${AVDMANAGER_BAT}`);
 
