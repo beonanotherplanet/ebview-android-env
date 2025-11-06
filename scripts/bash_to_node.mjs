@@ -6,6 +6,34 @@
  * - AVD 생성 및 실행
  */
 
+
+// 압축 해제 직후
+fs.rmSync(zipPath, { force: true });
+
+// ✅ 풀린 폴더를 '실제로 java.exe가 있는 디렉터리'로 동적으로 찾는다
+const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+const candidates = entries
+  .filter(e => e.isDirectory())
+  .map(e => path.join(baseDir, e.name))
+  // microsoft-jdk, jdk-17.*, jdk-17.0.11+9 등 다양한 이름 대응
+  .filter(p => /^.*(jdk|microsoft-jdk).*17/i.test(path.basename(p)));
+
+const jdkDir =
+  candidates.find(p => fs.existsSync(path.join(p, "bin", process.platform === "win32" ? "java.exe" : "java")))
+  || candidates[0];
+
+if (!jdkDir) {
+  throw new Error(`JDK 디렉터리를 찾지 못했습니다. (${baseDir} 안)`);
+}
+
+// ✅ 환경변수는 '찾은 폴더'로 설정
+process.env.JAVA_HOME = jdkDir;
+process.env.PATH = `${path.join(jdkDir, "bin")};${process.env.PATH || ""}`;
+
+success(`JDK 설치 완료: ${jdkDir}`);
+
+
+
 const http = require('node:http');
 
 function getOnce(pathname, {
