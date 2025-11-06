@@ -6,6 +6,53 @@
  * - AVD 생성 및 실행
  */
 
+const http = require('node:http');
+
+function getOnce(pathname, {
+  host = '127.0.0.1',
+  port = 9222,
+  timeoutMs = 3000,
+  preDelayMs = 250,              // 포워드 직후 레이스 완화용
+} = {}) {
+  return new Promise(async (resolve) => {
+    // 0) 요청 전에 살짝 대기 (레이스 완화)
+    if (preDelayMs > 0) await new Promise(r => setTimeout(r, preDelayMs));
+
+    let settled = false;
+    const safeResolve = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    const options = {
+      host,
+      port: Number(port),        // ← 반드시 숫자
+      path: pathname,
+      agent: new http.Agent({ keepAlive: false }), // 매번 새 연결(끊김 최소화)
+    };
+
+    const req = http.get(options, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; });
+      res.on('aborted', () => safeResolve([]));    // 중간에 끊김
+      res.on('end', () => {
+        if (res.statusCode >= 400) return safeResolve([]);
+        try {
+          const data = body.trim() ? JSON.parse(body) : [];
+          safeResolve(Array.isArray(data) ? data : []);
+        } catch {
+          safeResolve([]);                          // 파싱 실패도 조용히
+        }
+      });
+    });
+
+    // 연결 자체가 거절/리셋/타임아웃된 경우
+    req.on('error', () => safeResolve([]));         // ECONNREFUSED/ECONNRESET 등
+    req.setTimeout(timeoutMs, () => { try { req.destroy(); } finally { safeResolve([]); } });
+  });
+}
+
+
+
+
 // 필요: const { execFileSync } = require('node:child_process'); const http = require('node:http');
 
 // 사용 예: await fetchTargets({ port: 9222, adb: ADB, serial, requireSocket: `webview_devtools_remote_${pid}` })
