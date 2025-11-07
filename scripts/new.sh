@@ -1,6 +1,88 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-9222}"
+POLL_MS="${POLL_MS:-300}"
+MAX_WAIT_MS="${MAX_WAIT_MS:-15000}"
+FILTER_TITLE="${FILTER_TITLE:-}"
+FILTER_URL_SUBSTR="${FILTER_URL_SUBSTR:-}"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+open_url() {
+  local url="$1"
+  if have_cmd open; then open "$url" >/dev/null 2>&1 && return 0; fi
+  if have_cmd xdg-open; then xdg-open "$url" >/dev/null 2>&1 && return 0; fi
+  if [[ -n "${COMSPEC:-}" ]]; then cmd.exe /d /s /c start "" "$url" >/dev/null 2>&1 && return 0; fi
+  echo "URL을 자동으로 열 수 없습니다. 수동으로 여세요: $url" >&2
+  return 1
+}
+
+to_devtools_url() {
+  local ws="$1"
+  ws="${ws#ws://}"
+  printf 'devtools://devtools/bundled/inspector.html?ws=%s' "$ws"
+}
+
+pick_ws_url_with_jq() {
+  local json
+  if ! json="$(curl -fsS "http://$HOST:$PORT/json" 2>/dev/null)" || [[ "$json" = "[]" ]]; then
+    json="$(curl -fsS "http://$HOST:$PORT/json/list" 2>/dev/null || echo '[]')"
+  fi
+  echo "$json" | jq -r --arg t "$FILTER_TITLE" --arg u "$FILTER_URL_SUBSTR" '
+    map(select(.type=="page"))
+    | ( if ($t|length)>0 then map(select(.title|tostring|contains($t))) else . end )
+    | ( if ($u|length)>0 then map(select(.url|tostring|contains($u))) else . end )
+    | .[0].webSocketDebuggerUrl // empty
+  '
+}
+
+pick_ws_url_with_sed() {
+  local body
+  body="$(curl -fsS "http://$HOST:$PORT/json" 2>/dev/null || true)"
+  [[ -z "$body" || "$body" = "[]" ]] && body="$(curl -fsS "http://$HOST:$PORT/json/list" 2>/dev/null || true)"
+  echo "$body" \
+    | tr -d '\n' \
+    | sed -n 's/.*"type":"page".*?"webSocketDebuggerUrl":"\([^"]\+\)".*/\1/p' \
+    | head -n1
+}
+
+pick_ws_url() {
+  if have_cmd jq; then pick_ws_url_with_jq; else pick_ws_url_with_sed; fi
+}
+
+echo ">> DevTools 자동 오픈: http://$HOST:$PORT/json(list) 타겟 대기 중..."
+elapsed=0
+wsurl=""
+interval_sec="$(printf '%.3f' "$(awk "BEGIN{print $POLL_MS/1000}" 2>/dev/null || echo "0.300")")"
+
+while (( elapsed < MAX_WAIT_MS )); do
+  if curl -fsS "http://$HOST:$PORT/json/version" >/dev/null 2>&1; then
+    wsurl="$(pick_ws_url || true)"
+    if [[ -n "$wsurl" ]]; then
+      devtools_url="$(to_devtools_url "$wsurl")"
+      echo ">> 대상 발견. DevTools 오픈: $devtools_url"
+      open_url "$devtools_url" || true
+      exit 0
+    fi
+  fi
+  sleep "$interval_sec"                                # ← Perl 제거, 순수 bash
+  (( elapsed += POLL_MS ))
+done
+
+echo "!! 타겟을 찾지 못했습니다. 포워딩/소켓/앱 상태를 확인하세요."
+exit 1
+
+
+
+
+
+
 # ==== 설정 ====
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-9222}"
