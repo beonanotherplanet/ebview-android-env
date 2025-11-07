@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ws='ws://127.0.0.1:9222/devtools/page/<id>'; url="devtools://devtools/bundled/inspector.html?ws=${ws#ws://}"; (command -v open>/dev/null&&open "$url")||(command -v xdg-open>/dev/null&&xdg-open "$url")||([ -n "${COMSPEC:-}" ]&&cmd.exe /d /s /c start "" "$url")||echo "$url"
+
+
+
+
 
 #!/usr/bin/env bash
 set -euo pipefail
