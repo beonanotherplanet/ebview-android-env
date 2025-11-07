@@ -1,6 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- 설정 (윈도우 전용) ---
+PORT="${PORT:-9222}"               # 이미 포워딩된 포트
+FILTER="${FILTER:-}"               # 선택: 탭 URL에 포함될 문자열(없으면 첫 번째 page)
+
+JSON_URL="http://localhost:${PORT}/json/list"
+
+# 필수 도구 확인
+command -v curl >/dev/null 2>&1 || { echo "[x] curl 필요"; exit 1; }
+command -v jq   >/dev/null 2>&1 || { echo "[x] jq 필요"; exit 1; }
+
+# JSON 한 번만 가져오기
+JSON="$(curl -sf "$JSON_URL")"
+
+# jq 셀렉터: type=="page" + (선택) URL 필터
+JQ_BASE='.[] | select(.type=="page")'
+if [[ -n "$FILTER" ]]; then
+  JQ_BASE="${JQ_BASE} | select(.url | tostring | contains(\"${FILTER}\"))"
+fi
+
+# 1순위: devtoolsFrontendUrlCompat/ devtoolsFrontendUrl (경로가 /devtools/... 이면 appspot 프론트엔드로 연다)
+PATH_PART="$(jq -r "${JQ_BASE} | (.devtoolsFrontendUrlCompat // .devtoolsFrontendUrl // empty)" <<<"$JSON" | head -n1)"
+
+# 2순위: webSocketDebuggerUrl 로 inspector.html 구성
+WS_URL="$(jq -r "${JQ_BASE} | .webSocketDebuggerUrl // empty" <<<"$JSON" | head -n1)"
+
+if [[ -n "$PATH_PART" && "$PATH_PART" == /devtools/* ]]; then
+  FINAL_URL="https://chrome-devtools-frontend.appspot.com${PATH_PART}"
+elif [[ -n "$WS_URL" ]]; then
+  FINAL_URL="https://chrome-devtools-frontend.appspot.com/serve_file/@10.0.0/inspector.html?ws=${WS_URL}"
+elif [[ -n "$PATH_PART" ]]; then
+  # devtools:// 로 시작하는 경우가 있을 수 있으나, Windows에서 직접 열기 호환성이 떨어져서 안내만 출력
+  FINAL_URL="$PATH_PART"
+else
+  echo "[x] DevTools 대상 탭을 찾지 못했습니다."; exit 1
+fi
+
+echo "[i] Open DevTools: $FINAL_URL"
+# 윈도우 전용 오픈 (기본 브라우저로 열림)
+cmd.exe /C start "" "$FINAL_URL" >/dev/null 2>&1 || {
+  echo "[x] 브라우저 열기 실패. URL 수동으로 열어주세요:"
+  echo "$FINAL_URL"
+  exit 1
+}
+
+
+
+
+
+
 ws='ws://127.0.0.1:9222/devtools/page/<id>'; url="devtools://devtools/bundled/inspector.html?ws=${ws#ws://}"; (command -v open>/dev/null&&open "$url")||(command -v xdg-open>/dev/null&&xdg-open "$url")||([ -n "${COMSPEC:-}" ]&&cmd.exe /d /s /c start "" "$url")||echo "$url"
 
 
