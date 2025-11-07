@@ -1,4 +1,74 @@
 #!/usr/bin/env bash
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- 설정 (Windows 전용) ---
+PORT="${PORT:-9222}"          # 이미 adb forward 된 포트
+FILTER="${FILTER:-}"          # 선택: 탭 URL에 포함될 문자열(없으면 첫번째 page)
+
+command -v powershell.exe >/dev/null 2>&1 || {
+  echo "[x] powershell.exe를 찾을 수 없습니다 (Windows PowerShell 필요)"; exit 1;
+}
+
+# PowerShell로 /json/list 파싱 → DevTools URL 산출
+FINAL_URL="$(
+  powershell.exe -NoProfile -Command "
+    \$ErrorActionPreference = 'Stop'
+    \$url  = 'http://localhost:${PORT}/json/list'
+    \$json = (Invoke-WebRequest -UseBasicParsing -Uri \$url).Content
+    \$items = \$json | ConvertFrom-Json
+
+    # type=='page' 필터
+    \$pages = \$items | Where-Object { \$_.type -eq 'page' }
+
+    # URL 부분 필터(FILTER 환경변수)
+    \$filter = [Environment]::GetEnvironmentVariable('FILTER','Process')
+    if ([string]::IsNullOrEmpty(\$filter) -eq \$false) {
+      \$pages = \$pages | Where-Object { \$_.url -like ('*' + \$filter + '*') }
+    }
+
+    if (-not \$pages) { exit 2 }
+
+    \$first = \$pages | Select-Object -First 1
+
+    \$path = \$first.devtoolsFrontendUrlCompat
+    if (-not \$path -or [string]::IsNullOrEmpty(\$path)) { \$path = \$first.devtoolsFrontendUrl }
+
+    \$ws = \$first.webSocketDebuggerUrl
+
+    if (\$path -and \$path.StartsWith('/devtools/')) {
+      \$final = 'https://chrome-devtools-frontend.appspot.com' + \$path
+    } elseif (\$ws) {
+      # websocket 기반 fallback
+      \$final = 'https://chrome-devtools-frontend.appspot.com/serve_file/@10.0.0/inspector.html?ws=' + \$ws
+    } elseif (\$path) {
+      # devtools:// 스킴일 수 있음 (크롬 주소창에 붙여넣어야 할 수도)
+      \$final = \$path
+    } else {
+      exit 3
+    }
+
+    Write-Output \$final
+  " | tr -d '\r'
+)"
+
+if [[ -z "${FINAL_URL:-}" ]]; then
+  echo "[x] DevTools URL 추출 실패"; exit 1
+fi
+
+echo "[i] Open DevTools: $FINAL_URL"
+# 윈도우 기본 브라우저로 열기
+cmd.exe /C start "" "$FINAL_URL" >/dev/null 2>&1 || {
+  echo "[x] 브라우저 열기 실패. URL 수동으로 열어주세요:"
+  echo "$FINAL_URL"
+  exit 1
+}
+
+
+
+
+
 set -euo pipefail
 
 #!/usr/bin/env bash
