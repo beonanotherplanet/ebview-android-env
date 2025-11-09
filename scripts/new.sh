@@ -1,5 +1,42 @@
 #!/usr/bin/env bash
 
+
+#!/usr/bin/env bash
+# Windows Git Bash 전용: DevTools 전용 창 자동 오픈
+
+# 예) CHROME_EXE="C:/Program Files/Google/Chrome/Application/chrome.exe"
+CHROME_EXE="${CHROME_EXE:-C:/Program Files/Google/Chrome/Application/chrome.exe}"
+
+# 여기에 DevTools URL을 넣으세요 (devtools:// 말고 chrome-devtools:// 사용!)
+# 형식 예시:
+# chrome-devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9222/devtools/page/<targetId>
+DEVTOOLS_URL="${DEVTOOLS_URL:-chrome-devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9222/devtools/page/REPLACE_ME}"
+
+# 1) --app 없이 새 창으로 (가장 안정적)
+open_plain() {
+  "$CHROME_EXE" --new-window --user-data-dir="$(mktemp -d | tr -d '\r')" "$DEVTOOLS_URL" >/dev/null 2>&1 &
+}
+
+# 2) --app로 강제로 앱 창: 일부 환경에선 여전히 막힐 수 있음
+open_app_mode() {
+  "$CHROME_EXE" --user-data-dir="$(mktemp -d | tr -d '\r')" --app="$DEVTOOLS_URL" >/dev/null 2>&1 &
+}
+
+# 3) --app 우회: data: URI로 먼저 열고 즉시 devtools로 리다이렉트(앱 모드가 막힐 때 대안)
+open_app_redirect() {
+  local ESCAPED
+  # & 등 특수문자 있는 경우를 위해 URL 인코딩 최소화
+  ESCAPED=$(printf '%s' "$DEVTOOLS_URL" | sed 's/&/\&amp;/g' | sed "s/'/%27/g")
+  local DATA_URI="data:text/html,<meta http-equiv='refresh' content='0;url=${ESCAPED}'>"
+  "$CHROME_EXE" --user-data-dir="$(mktemp -d | tr -d '\r')" --app="$DATA_URI" >/dev/null 2>&1 &
+}
+
+# 우선 1번 시도, 실패하면 2번→3번 순으로 시도
+open_plain || open_app_mode || open_app_redirect
+
+
+
+
 #!/usr/bin/env bash
 set -euo pipefail
 
