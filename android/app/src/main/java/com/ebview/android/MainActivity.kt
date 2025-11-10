@@ -26,7 +26,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var isWebViewErrorState = false
-    private val targetUrl = "http://10.0.2.2:5173"
+    private val targetUrl = "http://10.0.2.2:3100"
 
     // ⬇️ 오버레이 새로고침 버튼 참조 (ImageButton 타입으로 교체)
     private lateinit var refreshBtn: AppCompatImageButton
