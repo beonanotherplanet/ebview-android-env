@@ -2,6 +2,86 @@
 
 
 #!/usr/bin/env bash
+# open-devtools-with-chrome.sh
+# 사용: CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe" ./open-devtools-with-chrome.sh devtools/page/<ID>
+
+set -euo pipefail
+
+if [ -z "${CHROME_PATH:-}" ] || [ ! -x "${CHROME_PATH//\\//}" ]; then
+  echo "CHROME_PATH 환경변수에 chrome.exe의 절대 경로를 지정해주세요." >&2
+  exit 1
+fi
+
+ID="${1:-}"
+if [ -z "$ID" ]; then
+  echo "사용법: ./open-devtools-with-chrome.sh devtools/page/<ID>" >&2
+  exit 1
+fi
+
+WS="localhost:9222/$ID"
+
+# 1) 현재 디버깅 백엔드가 요구하는 프런트엔드 URL 정보 읽기
+ver_json="$(curl -s http://localhost:9222/json/version || true)"
+if [ -z "$ver_json" ]; then
+  echo "localhost:9222에 접속되지 않습니다. adb forward 또는 디버깅 대상이 살아있는지 확인하세요." >&2
+  exit 1
+fi
+
+# 2) devtoolsFrontendUrl 추출 (jq 없이 sed)
+frontend="$(printf %s "$ver_json" | sed -n 's/.*"devtoolsFrontendUrl":"\([^"]*\)".*/\1/p' | head -n1 || true)"
+
+final_url=""
+if [ -n "$frontend" ]; then
+  if printf %s "$frontend" | grep -q 'remoteBase='; then
+    # 예: /devtools/inspector.html?remoteBase=https://chrome-devtools-frontend.appspot.com/serve_file/@HASH/&ws=...
+    base="$(printf %s "$frontend" | sed -n 's/.*remoteBase=\([^&]*\).*/\1/p')"
+    qs="$(printf %s "$frontend" \
+        | sed 's/^[^?]*?//' \
+        | sed 's/\(^\|&\)remoteBase=[^&]*&\?//; s/[&?]$//')"
+    final_url="${base}inspector.html?${qs}"
+  else
+    # 예: /devtools/inspector.html?ws=...
+    final_url="https://chrome-devtools-frontend.appspot.com${frontend}"
+  fi
+fi
+
+open_http() {
+  # 주소창 있는 일반 새 창으로 오픈 (— 뒤에 URL 두어 옵션 파싱 방지)
+  "${CHROME_PATH//\\//}" --new-window -- "$1" \
+    --no-first-run --no-default-browser-check >/dev/null 2>&1 & disown || true
+}
+
+open_devtools_scheme() {
+  # appspot이 막혀 있거나 404일 때의 플랜 B: devtools:// 직접
+  dev_url="devtools://devtools/bundled/inspector.html?ws=$WS"
+  # 임시 프로필로 별도 인스턴스 띄워 인자 드랍 방지
+  TMPDIR_WIN="/mnt/c/Users/$USERNAME/AppData/Local/Temp/devtools-profile-$$"
+  mkdir -p "$TMPDIR_WIN"
+  "${CHROME_PATH//\\//}" --user-data-dir="$TMPDIR_WIN" --new-window -- "$dev_url" \
+    --no-first-run --no-default-browser-check >/dev/null 2>&1 & disown || true
+}
+
+if [ -n "$final_url" ]; then
+  open_http "$final_url"
+else
+  # version 응답에 프런트엔드 경로가 없으면 해시 없이 시도
+  final_url="https://chrome-devtools-frontend.appspot.com/devtools/inspector.html?ws=$WS"
+  open_http "$final_url"
+fi
+
+# 1초 대기 후 프로세스가 죽었거나 (사내망 차단 등으로) 실패했다고 판단되면 devtools://로 재시도
+sleep 1
+# 간단히: 실패 감지 어렵기 때문에 항상 보조 시도도 함께 해도 무방
+open_devtools_scheme
+
+echo "DevTools 열기 시도 완료."
+
+
+
+
+
+
+#!/usr/bin/env bash
 # Windows Git Bash 전용: DevTools 전용 창 자동 오픈
 
 # 예) CHROME_EXE="C:/Program Files/Google/Chrome/Application/chrome.exe"
